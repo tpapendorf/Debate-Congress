@@ -1,0 +1,837 @@
+'use strict';
+const path = require('node:path');
+const crypto = require('node:crypto');
+const express = require('express');
+
+// ---------- helpers ----------
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(pw, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+function checkPassword(pw, stored) {
+  const [salt, hash] = String(stored).split(':');
+  if (!salt || !hash) return false;
+  const test = crypto.scryptSync(pw, salt, 64);
+  const known = Buffer.from(hash, 'hex');
+  return known.length === test.length && crypto.timingSafeEqual(known, test);
+}
+function randomPassword() {
+  // Easy to read aloud / type on a phone: three lowercase syllables + 2 digits.
+  const c = 'bcdfghjkmnprstvwz', v = 'aeiou';
+  let s = '';
+  for (let i = 0; i < 3; i++) s += c[crypto.randomInt(c.length)] + v[crypto.randomInt(v.length)] + c[crypto.randomInt(c.length)];
+  return s + crypto.randomInt(10, 100);
+}
+function parseCookies(header) {
+  const out = {};
+  for (const part of String(header || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+class HttpError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+const bad = (msg) => new HttpError(400, msg);
+const forbidden = (msg = 'You do not have permission to do that.') => new HttpError(403, msg);
+const notFound = (msg = 'Not found.') => new HttpError(404, msg);
+
+const SIDES = ['authorship', 'sponsorship', 'aff', 'neg'];
+const MOTIONS = {
+  previous_question: { label: 'Previous question', threshold: 'two_thirds' },
+  amend: { label: 'Amendment', threshold: 'majority' },
+  table: { label: 'Table', threshold: 'majority' },
+  take_from_table: { label: 'Take from the table', threshold: 'majority' },
+  recess: { label: 'Recess', threshold: 'majority' },
+  adjourn: { label: 'Adjourn', threshold: 'majority' },
+  extend_questioning: { label: 'Extend questioning', threshold: 'two_thirds' },
+  other: { label: 'Other', threshold: 'majority' },
+};
+
+function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}) {
+  const app = express();
+  app.use(express.json({ limit: '1mb' }));
+
+  const q = (sql) => db.prepare(sql);
+  const tx = (fn) => {
+    db.exec('BEGIN');
+    try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; }
+  };
+
+  // ---------- live updates (server-sent events) ----------
+  const listeners = new Map(); // chamberId -> Set(res)
+  function broadcast(chamberId) {
+    const set = listeners.get(Number(chamberId));
+    if (!set) return;
+    for (const res of set) res.write(`event: changed\ndata: ${Date.now()}\n\n`);
+  }
+  const heartbeat = setInterval(() => {
+    for (const set of listeners.values()) for (const res of set) res.write(': ping\n\n');
+  }, 25000);
+  heartbeat.unref();
+
+  // ---------- auth ----------
+  function currentUser(req) {
+    const token = parseCookies(req.headers.cookie).sid;
+    if (!token) return null;
+    return q(`SELECT u.id, u.username, u.display_name, u.school, u.role FROM sessions s
+              JOIN users u ON u.id = s.user_id WHERE s.token = ?`).get(token) || null;
+  }
+  app.use((req, _res, next) => { req.user = currentUser(req); next(); });
+  const requireUser = (req) => { if (!req.user) throw new HttpError(401, 'Please sign in.'); return req.user; };
+  const requireAdmin = (req) => { const u = requireUser(req); if (u.role !== 'admin') throw forbidden(); return u; };
+
+  const wrap = (fn) => (req, res) => {
+    try {
+      const out = fn(req, res);
+      if (out !== undefined && !res.headersSent) res.json(out);
+    } catch (e) {
+      if (e instanceof HttpError) return res.status(e.status).json({ error: e.message });
+      if (String(e.message).includes('UNIQUE constraint failed: users.username')) {
+        return res.status(400).json({ error: 'That username is already taken.' });
+      }
+      console.error(e);
+      res.status(500).json({ error: 'Something went wrong.' });
+    }
+  };
+
+  function startSession(res, userId) {
+    const token = crypto.randomBytes(32).toString('hex');
+    q('INSERT INTO sessions (token, user_id) VALUES (?, ?)').run(token, userId);
+    const secure = process.env.COOKIE_SECURE === '1' ? '; Secure' : '';
+    res.setHeader('Set-Cookie', `sid=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 30}${secure}`);
+  }
+
+  app.get('/api/setup', wrap(() => ({ needed: q('SELECT COUNT(*) n FROM users').get().n === 0 })));
+  app.post('/api/setup', wrap((req, res) => {
+    if (q('SELECT COUNT(*) n FROM users').get().n > 0) throw forbidden('Setup is already complete.');
+    const { username, display_name, password } = req.body || {};
+    if (!username || !password || password.length < 6) throw bad('Choose a username and a password of at least 6 characters.');
+    const r = q(`INSERT INTO users (username, display_name, role, password_hash) VALUES (?, ?, 'admin', ?)`)
+      .run(username.trim(), (display_name || username).trim(), hashPassword(password));
+    startSession(res, Number(r.lastInsertRowid));
+    return { ok: true };
+  }));
+
+  app.post('/api/login', wrap((req, res) => {
+    const { username, password } = req.body || {};
+    const u = q('SELECT * FROM users WHERE username = ?').get(String(username || '').trim());
+    if (!u || !checkPassword(String(password || ''), u.password_hash)) throw new HttpError(401, 'Wrong username or password.');
+    startSession(res, u.id);
+    return { ok: true };
+  }));
+  app.post('/api/logout', wrap((req, res) => {
+    const token = parseCookies(req.headers.cookie).sid;
+    if (token) q('DELETE FROM sessions WHERE token = ?').run(token);
+    res.setHeader('Set-Cookie', 'sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
+    return { ok: true };
+  }));
+  app.get('/api/me', wrap((req) => ({ user: req.user })));
+  app.post('/api/me/password', wrap((req) => {
+    const u = requireUser(req);
+    const { current, next } = req.body || {};
+    const row = q('SELECT password_hash FROM users WHERE id = ?').get(u.id);
+    if (!checkPassword(String(current || ''), row.password_hash)) throw bad('Current password is wrong.');
+    if (!next || next.length < 6) throw bad('New password must be at least 6 characters.');
+    q('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(next), u.id);
+    return { ok: true };
+  }));
+
+  // ---------- users (admin) ----------
+  app.get('/api/users', wrap((req) => {
+    requireAdmin(req);
+    return { users: q('SELECT id, username, display_name, school, role FROM users ORDER BY role, display_name').all() };
+  }));
+  function makeUsername(name) {
+    const base = String(name).toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '') || 'user';
+    let candidate = base, n = 1;
+    while (q('SELECT 1 FROM users WHERE username = ?').get(candidate)) candidate = `${base}${++n}`;
+    return candidate;
+  }
+  function createUser({ username, display_name, school = '', role, password }) {
+    if (!display_name || !String(display_name).trim()) throw bad('Name is required.');
+    if (!['admin', 'judge', 'competitor'].includes(role)) throw bad('Role must be admin, judge or competitor.');
+    const uname = username ? String(username).trim() : makeUsername(display_name);
+    const pw = password || randomPassword();
+    const r = q('INSERT INTO users (username, display_name, school, role, password_hash) VALUES (?, ?, ?, ?, ?)')
+      .run(uname, String(display_name).trim(), String(school).trim(), role, hashPassword(pw));
+    return { id: Number(r.lastInsertRowid), username: uname, display_name: String(display_name).trim(), school, role, password: pw };
+  }
+  app.post('/api/users', wrap((req) => { requireAdmin(req); return { user: createUser(req.body || {}) }; }));
+  // Bulk add: one per line, "Name, School, role" (role defaults to competitor).
+  app.post('/api/users/bulk', wrap((req) => {
+    requireAdmin(req);
+    const lines = String((req.body || {}).text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) throw bad('Paste at least one line.');
+    const created = tx(() => lines.map((line) => {
+      const [name, school = '', role = 'competitor'] = line.split(',').map((s) => s.trim());
+      return createUser({ display_name: name, school, role: role.toLowerCase() || 'competitor' });
+    }));
+    return { users: created };
+  }));
+  app.put('/api/users/:id', wrap((req) => {
+    requireAdmin(req);
+    const u = q('SELECT * FROM users WHERE id = ?').get(Number(req.params.id));
+    if (!u) throw notFound();
+    const b = req.body || {};
+    const role = b.role || u.role;
+    if (!['admin', 'judge', 'competitor'].includes(role)) throw bad('Bad role.');
+    q('UPDATE users SET display_name = ?, school = ?, role = ? WHERE id = ?')
+      .run(b.display_name ?? u.display_name, b.school ?? u.school, role, u.id);
+    let password;
+    if (b.reset_password) {
+      password = randomPassword();
+      q('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(password), u.id);
+      q('DELETE FROM sessions WHERE user_id = ?').run(u.id);
+    }
+    return { ok: true, password };
+  }));
+  app.delete('/api/users/:id', wrap((req) => {
+    const admin = requireAdmin(req);
+    if (Number(req.params.id) === admin.id) throw bad('You cannot delete your own account.');
+    q('DELETE FROM users WHERE id = ?').run(Number(req.params.id));
+    return { ok: true };
+  }));
+
+  // ---------- chambers ----------
+  function getChamber(id) {
+    const c = q('SELECT * FROM chambers WHERE id = ?').get(Number(id));
+    if (!c) throw notFound('Chamber not found.');
+    return c;
+  }
+  function membership(c, user) {
+    const member = !!q('SELECT 1 FROM chamber_members WHERE chamber_id = ? AND user_id = ?').get(c.id, user.id);
+    const isAdmin = user.role === 'admin';
+    return {
+      isAdmin,
+      member,
+      isPO: member && c.po_user_id === user.id,
+      isJudge: member && user.role === 'judge',
+      isCompetitor: member && user.role === 'competitor',
+      canChair: isAdmin || (member && c.po_user_id === user.id),
+    };
+  }
+  function loadChamber(req, need) {
+    const user = requireUser(req);
+    const c = getChamber(req.params.id);
+    const m = membership(c, user);
+    if (!m.isAdmin && !m.member) throw forbidden('You are not part of this chamber.');
+    if (need === 'chair' && !m.canChair) throw forbidden('Only the presiding officer or an admin can do that.');
+    if (need === 'admin' && !m.isAdmin) throw forbidden('Only an admin can do that.');
+    if (need === 'judge' && !m.isJudge) throw forbidden('Only judges in this chamber can score.');
+    if (need === 'competitor' && !m.isCompetitor) throw forbidden('Only competitors in this chamber can do that.');
+    return { user, c, m };
+  }
+  const done = (c, extra = {}) => { broadcast(c.id); return { ok: true, ...extra }; };
+
+  app.get('/api/chambers', wrap((req) => {
+    const u = requireUser(req);
+    const rows = u.role === 'admin'
+      ? q('SELECT * FROM chambers ORDER BY id DESC').all()
+      : q(`SELECT c.* FROM chambers c JOIN chamber_members m ON m.chamber_id = c.id
+           WHERE m.user_id = ? ORDER BY c.id DESC`).all(u.id);
+    return { chambers: rows.map((c) => ({ id: c.id, name: c.name, status: c.status, is_po: c.po_user_id === u.id })) };
+  }));
+  app.post('/api/chambers', wrap((req) => {
+    requireAdmin(req);
+    const name = String((req.body || {}).name || '').trim();
+    if (!name) throw bad('Give the chamber a name.');
+    const r = q('INSERT INTO chambers (name) VALUES (?)').run(name);
+    return { id: Number(r.lastInsertRowid) };
+  }));
+  app.delete('/api/chambers/:id', wrap((req) => {
+    const { c } = loadChamber(req, 'admin');
+    q('DELETE FROM chambers WHERE id = ?').run(c.id);
+    return { ok: true };
+  }));
+
+  const SETTINGS = ['name', 'score_min', 'score_max', 'rank_count', 'speech_seconds', 'authorship_question_seconds', 'question_seconds'];
+  app.put('/api/chambers/:id', wrap((req) => {
+    const { c } = loadChamber(req, 'admin');
+    const b = req.body || {};
+    const next = { ...c };
+    for (const k of SETTINGS) if (b[k] !== undefined) next[k] = k === 'name' ? String(b[k]).trim() : Number(b[k]);
+    if (!next.name) throw bad('Name is required.');
+    for (const k of SETTINGS.slice(1)) if (!Number.isInteger(next[k]) || next[k] < 0) throw bad(`${k} must be a whole number.`);
+    if (next.score_min >= next.score_max) throw bad('Lowest score must be below the highest score.');
+    if ('po_user_id' in b) {
+      const po = b.po_user_id ? Number(b.po_user_id) : null;
+      if (po && !q(`SELECT 1 FROM chamber_members m JOIN users u ON u.id = m.user_id
+                    WHERE m.chamber_id = ? AND m.user_id = ? AND u.role = 'competitor'`).get(c.id, po)) {
+        throw bad('The presiding officer must be a competitor in this chamber.');
+      }
+      next.po_user_id = po;
+    }
+    q(`UPDATE chambers SET name=?, score_min=?, score_max=?, rank_count=?, speech_seconds=?,
+       authorship_question_seconds=?, question_seconds=?, po_user_id=? WHERE id=?`)
+      .run(next.name, next.score_min, next.score_max, next.rank_count, next.speech_seconds,
+        next.authorship_question_seconds, next.question_seconds, next.po_user_id, c.id);
+    return done(c);
+  }));
+
+  app.post('/api/chambers/:id/members', wrap((req) => {
+    const { c } = loadChamber(req, 'admin');
+    const ids = ((req.body || {}).user_ids || []).map(Number);
+    const ins = q('INSERT OR IGNORE INTO chamber_members (chamber_id, user_id, seat) VALUES (?, ?, ?)');
+    tx(() => {
+      let seat = q('SELECT COALESCE(MAX(seat), 0) s FROM chamber_members WHERE chamber_id = ?').get(c.id).s;
+      for (const id of ids) {
+        const u = q('SELECT role FROM users WHERE id = ?').get(id);
+        if (!u || u.role === 'admin') continue;
+        ins.run(c.id, id, u.role === 'competitor' ? ++seat : null);
+      }
+    });
+    return done(c);
+  }));
+  app.delete('/api/chambers/:id/members/:uid', wrap((req) => {
+    const { c } = loadChamber(req, 'admin');
+    const uid = Number(req.params.uid);
+    q('DELETE FROM chamber_members WHERE chamber_id = ? AND user_id = ?').run(c.id, uid);
+    if (c.po_user_id === uid) q('UPDATE chambers SET po_user_id = NULL WHERE id = ?').run(c.id);
+    return done(c);
+  }));
+
+  // ---------- docket ----------
+  app.post('/api/chambers/:id/legislation', wrap((req) => {
+    const { c } = loadChamber(req, 'admin');
+    const b = req.body || {};
+    if (!String(b.title || '').trim()) throw bad('Title is required.');
+    const order = q('SELECT COALESCE(MAX(docket_order), 0) + 1 n FROM legislation WHERE chamber_id = ?').get(c.id).n;
+    q('INSERT INTO legislation (chamber_id, title, kind, author, body, docket_order) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(c.id, String(b.title).trim(), b.kind === 'resolution' ? 'resolution' : 'bill', String(b.author || ''), String(b.body || ''), order);
+    return done(c);
+  }));
+  function getLeg(c, lid) {
+    const l = q('SELECT * FROM legislation WHERE id = ? AND chamber_id = ?').get(Number(lid), c.id);
+    if (!l) throw notFound('Legislation not found.');
+    return l;
+  }
+  app.put('/api/chambers/:id/legislation/:lid', wrap((req) => {
+    const { c } = loadChamber(req, 'admin');
+    const l = getLeg(c, req.params.lid);
+    const b = req.body || {};
+    q('UPDATE legislation SET title = ?, kind = ?, author = ?, body = ? WHERE id = ?')
+      .run(String(b.title ?? l.title).trim() || l.title, b.kind === 'resolution' ? 'resolution' : (b.kind === 'bill' ? 'bill' : l.kind),
+        String(b.author ?? l.author), String(b.body ?? l.body), l.id);
+    return done(c);
+  }));
+  app.delete('/api/chambers/:id/legislation/:lid', wrap((req) => {
+    const { c } = loadChamber(req, 'admin');
+    const l = getLeg(c, req.params.lid);
+    if (q('SELECT 1 FROM speeches WHERE legislation_id = ?').get(l.id)) throw bad('Speeches were given on this item, so it cannot be deleted.');
+    q('DELETE FROM legislation WHERE id = ?').run(l.id);
+    if (c.current_legislation_id === l.id) q('UPDATE chambers SET current_legislation_id = NULL WHERE id = ?').run(c.id);
+    return done(c);
+  }));
+  // The chamber votes the docket into order; the chair records the agreed order here.
+  app.post('/api/chambers/:id/docket-order', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    const ids = ((req.body || {}).ids || []).map(Number);
+    const upd = q('UPDATE legislation SET docket_order = ? WHERE id = ? AND chamber_id = ?');
+    tx(() => ids.forEach((id, i) => upd.run(i + 1, id, c.id)));
+    return done(c);
+  }));
+
+  // ---------- chair (presiding officer) controls ----------
+  function setTimer(c, label, duration) {
+    q('UPDATE chambers SET timer_label = ?, timer_duration = ?, timer_started_at = ?, timer_elapsed_ms = 0 WHERE id = ?')
+      .run(label, duration, Date.now(), c.id);
+  }
+  function timerElapsedMs(c) {
+    return c.timer_elapsed_ms + (c.timer_started_at ? Date.now() - c.timer_started_at : 0);
+  }
+  function closeCurrentSpeech(c) {
+    if (!c.current_speech_id) return;
+    const s = q('SELECT * FROM speeches WHERE id = ?').get(c.current_speech_id);
+    if (s && !s.ended_at) {
+      const dur = s.duration_seconds ?? (c.timer_label === 'Speech' ? Math.round(timerElapsedMs(c) / 1000) : null);
+      q('UPDATE speeches SET ended_at = ?, duration_seconds = ? WHERE id = ?').run(Date.now(), dur, s.id);
+    }
+    q(`UPDATE chambers SET current_speech_id = NULL, timer_label = NULL, timer_duration = NULL,
+       timer_started_at = NULL, timer_elapsed_ms = 0 WHERE id = ?`).run(c.id);
+  }
+
+  app.post('/api/chambers/:id/status', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    const status = (req.body || {}).status;
+    if (!['setup', 'in_session', 'recess', 'adjourned'].includes(status)) throw bad('Bad status.');
+    q('UPDATE chambers SET status = ? WHERE id = ?').run(status, c.id);
+    return done(c);
+  }));
+
+  app.post('/api/chambers/:id/legislation/:lid/begin', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    const l = getLeg(c, req.params.lid);
+    tx(() => {
+      closeCurrentSpeech(c);
+      if (c.current_legislation_id && c.current_legislation_id !== l.id) {
+        q(`UPDATE legislation SET status = 'pending' WHERE id = ? AND status = 'debating'`).run(c.current_legislation_id);
+      }
+      q(`UPDATE legislation SET status = 'debating' WHERE id = ?`).run(l.id);
+      q(`UPDATE chambers SET current_legislation_id = ?, status = 'in_session' WHERE id = ?`).run(l.id, c.id);
+      q(`DELETE FROM speech_requests WHERE chamber_id = ?`).run(c.id);
+    });
+    return done(c);
+  }));
+
+  app.post('/api/chambers/:id/recognize', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    const { user_id, side } = req.body || {};
+    if (!c.current_legislation_id) throw bad('Begin debate on a docket item first.');
+    if (!SIDES.includes(side)) throw bad('Pick a side.');
+    const speaker = q(`SELECT u.id FROM users u JOIN chamber_members m ON m.user_id = u.id
+                       WHERE m.chamber_id = ? AND u.id = ? AND u.role = 'competitor'`).get(c.id, Number(user_id));
+    if (!speaker) throw bad('That person is not a competitor in this chamber.');
+    const id = tx(() => {
+      closeCurrentSpeech(c);
+      const r = q('INSERT INTO speeches (chamber_id, legislation_id, speaker_id, side, recognized_at) VALUES (?, ?, ?, ?, ?)')
+        .run(c.id, c.current_legislation_id, speaker.id, side, Date.now());
+      const sid = Number(r.lastInsertRowid);
+      q('UPDATE chambers SET current_speech_id = ? WHERE id = ?').run(sid, c.id);
+      q(`DELETE FROM speech_requests WHERE chamber_id = ? AND user_id = ? AND kind IN ('aff','neg')`).run(c.id, speaker.id);
+      setTimer(c, 'Speech', c.speech_seconds);
+      return sid;
+    });
+    return done(c, { speech_id: id });
+  }));
+
+  app.post('/api/chambers/:id/questioning', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    if (!c.current_speech_id) throw bad('No one has the floor.');
+    const s = q('SELECT * FROM speeches WHERE id = ?').get(c.current_speech_id);
+    if (s.duration_seconds == null && c.timer_label === 'Speech') {
+      q('UPDATE speeches SET duration_seconds = ? WHERE id = ?').run(Math.round(timerElapsedMs(c) / 1000), s.id);
+    }
+    const secs = ['authorship', 'sponsorship'].includes(s.side) ? c.authorship_question_seconds : c.question_seconds;
+    setTimer(c, 'Questioning', secs);
+    return done(c);
+  }));
+
+  app.post('/api/chambers/:id/questions', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    if (!c.current_speech_id) throw bad('No one has the floor.');
+    const uid = Number((req.body || {}).user_id);
+    if (!q(`SELECT 1 FROM chamber_members m JOIN users u ON u.id = m.user_id
+            WHERE m.chamber_id = ? AND u.id = ? AND u.role = 'competitor'`).get(c.id, uid)) throw bad('Not a competitor in this chamber.');
+    q('INSERT INTO questions (chamber_id, speech_id, questioner_id, asked_at) VALUES (?, ?, ?, ?)').run(c.id, c.current_speech_id, uid, Date.now());
+    q(`DELETE FROM speech_requests WHERE chamber_id = ? AND user_id = ? AND kind = 'question'`).run(c.id, uid);
+    return done(c);
+  }));
+  app.delete('/api/chambers/:id/questions/:qid', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    q('DELETE FROM questions WHERE id = ? AND chamber_id = ?').run(Number(req.params.qid), c.id);
+    return done(c);
+  }));
+
+  app.post('/api/chambers/:id/speech/end', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    tx(() => closeCurrentSpeech(c));
+    return done(c);
+  }));
+  // Undo a mistaken recognition (only allowed before any judge has scored it).
+  app.delete('/api/chambers/:id/speeches/:sid', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    const sid = Number(req.params.sid);
+    if (q('SELECT 1 FROM speech_scores WHERE speech_id = ?').get(sid)) throw bad('A judge already scored this speech, so it cannot be removed.');
+    tx(() => {
+      if (c.current_speech_id === sid) closeCurrentSpeech(c);
+      q('DELETE FROM speeches WHERE id = ? AND chamber_id = ?').run(sid, c.id);
+    });
+    return done(c);
+  }));
+
+  app.post('/api/chambers/:id/timer', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    const { action, label, seconds } = req.body || {};
+    if (action === 'pause' && c.timer_started_at) {
+      q('UPDATE chambers SET timer_elapsed_ms = ?, timer_started_at = NULL WHERE id = ?').run(timerElapsedMs(c), c.id);
+    } else if (action === 'resume' && !c.timer_started_at && c.timer_duration != null) {
+      q('UPDATE chambers SET timer_started_at = ? WHERE id = ?').run(Date.now(), c.id);
+    } else if (action === 'reset' && c.timer_duration != null) {
+      q('UPDATE chambers SET timer_elapsed_ms = 0, timer_started_at = NULL WHERE id = ?').run(c.id);
+    } else if (action === 'custom') {
+      const s = Number(seconds);
+      if (!Number.isInteger(s) || s <= 0) throw bad('Seconds must be a positive whole number.');
+      setTimer(c, String(label || 'Timer').slice(0, 40), s);
+    } else if (action === 'clear') {
+      q('UPDATE chambers SET timer_label = NULL, timer_duration = NULL, timer_started_at = NULL, timer_elapsed_ms = 0 WHERE id = ?').run(c.id);
+    }
+    return done(c);
+  }));
+
+  // ---------- motions & votes ----------
+  app.post('/api/chambers/:id/motions', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    const { kind, mover_id, details } = req.body || {};
+    if (!MOTIONS[kind]) throw bad('Unknown motion.');
+    const r = q('INSERT INTO motions (chamber_id, legislation_id, kind, mover_id, details, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(c.id, c.current_legislation_id, kind, mover_id ? Number(mover_id) : null, String(details || ''), Date.now());
+    return done(c, { motion_id: Number(r.lastInsertRowid) });
+  }));
+  app.post('/api/chambers/:id/motions/:mid/status', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    const status = (req.body || {}).status;
+    if (!['passed', 'failed', 'withdrawn'].includes(status)) throw bad('Bad status.');
+    const m = q('SELECT * FROM motions WHERE id = ? AND chamber_id = ?').get(Number(req.params.mid), c.id);
+    if (!m) throw notFound();
+    tx(() => {
+      q('UPDATE motions SET status = ? WHERE id = ?').run(status, m.id);
+      if (status === 'passed') applyMotion(c, m);
+    });
+    return done(c);
+  }));
+  function applyMotion(c, m) {
+    if (m.kind === 'table' && m.legislation_id) {
+      q(`UPDATE legislation SET status = 'tabled' WHERE id = ?`).run(m.legislation_id);
+      if (c.current_legislation_id === m.legislation_id) {
+        closeCurrentSpeech(c);
+        q('UPDATE chambers SET current_legislation_id = NULL WHERE id = ?').run(c.id);
+      }
+    } else if (m.kind === 'recess') {
+      q(`UPDATE chambers SET status = 'recess' WHERE id = ?`).run(c.id);
+    } else if (m.kind === 'adjourn') {
+      closeCurrentSpeech(c);
+      q(`UPDATE chambers SET status = 'adjourned' WHERE id = ?`).run(c.id);
+    }
+  }
+
+  app.post('/api/chambers/:id/votes', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    const { target_type, target_id } = req.body || {};
+    if (q(`SELECT 1 FROM vote_rounds WHERE chamber_id = ? AND status = 'open'`).get(c.id)) throw bad('A vote is already open. Close it first.');
+    let threshold = 'majority';
+    if (target_type === 'legislation') {
+      getLeg(c, target_id);
+    } else if (target_type === 'motion') {
+      const m = q('SELECT * FROM motions WHERE id = ? AND chamber_id = ?').get(Number(target_id), c.id);
+      if (!m) throw notFound('Motion not found.');
+      threshold = MOTIONS[m.kind].threshold;
+      q(`UPDATE motions SET status = 'voting' WHERE id = ?`).run(m.id);
+    } else throw bad('Vote on legislation or a motion.');
+    if (req.body.threshold === 'two_thirds' || req.body.threshold === 'majority') threshold = req.body.threshold;
+    q('INSERT INTO vote_rounds (chamber_id, target_type, target_id, threshold, opened_at) VALUES (?, ?, ?, ?, ?)')
+      .run(c.id, target_type, Number(target_id), threshold, Date.now());
+    return done(c);
+  }));
+  function tally(vid) {
+    const t = { yes: 0, no: 0, abstain: 0 };
+    for (const r of q('SELECT choice, COUNT(*) n FROM ballots WHERE vote_round_id = ? GROUP BY choice').all(vid)) t[r.choice] = r.n;
+    return t;
+  }
+  function passes(t, threshold) {
+    const cast = t.yes + t.no;
+    if (cast === 0) return false;
+    return threshold === 'two_thirds' ? t.yes * 3 >= cast * 2 : t.yes * 2 > cast;
+  }
+  app.post('/api/chambers/:id/votes/:vid/close', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    const v = q(`SELECT * FROM vote_rounds WHERE id = ? AND chamber_id = ? AND status = 'open'`).get(Number(req.params.vid), c.id);
+    if (!v) throw notFound('No open vote.');
+    const cancel = (req.body || {}).cancel === true;
+    const t = tally(v.id);
+    const result = cancel ? 'cancelled' : (passes(t, v.threshold) ? 'passed' : 'failed');
+    tx(() => {
+      q(`UPDATE vote_rounds SET status = 'closed', result = ?, closed_at = ? WHERE id = ?`).run(result, Date.now(), v.id);
+      if (cancel) {
+        if (v.target_type === 'motion') q(`UPDATE motions SET status = 'pending' WHERE id = ?`).run(v.target_id);
+        return;
+      }
+      if (v.target_type === 'legislation') {
+        q('UPDATE legislation SET status = ?, vote_yes = ?, vote_no = ?, vote_abstain = ? WHERE id = ?')
+          .run(result, t.yes, t.no, t.abstain, v.target_id);
+        if (c.current_legislation_id === v.target_id) {
+          closeCurrentSpeech(c);
+          q('UPDATE chambers SET current_legislation_id = NULL WHERE id = ?').run(c.id);
+          q('DELETE FROM speech_requests WHERE chamber_id = ?').run(c.id);
+        }
+      } else {
+        q('UPDATE motions SET status = ? WHERE id = ?').run(result, v.target_id);
+        if (result === 'passed') applyMotion(c, q('SELECT * FROM motions WHERE id = ?').get(v.target_id));
+      }
+    });
+    return done(c, { result, tally: t });
+  }));
+  // Fallback for a hand/voice vote counted by the PO instead of on devices.
+  app.post('/api/chambers/:id/legislation/:lid/result', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    const l = getLeg(c, req.params.lid);
+    const b = req.body || {};
+    if (!['passed', 'failed', 'pending'].includes(b.status)) throw bad('Bad status.');
+    tx(() => {
+      q('UPDATE legislation SET status = ?, vote_yes = ?, vote_no = ?, vote_abstain = ? WHERE id = ?')
+        .run(b.status, b.yes ?? null, b.no ?? null, b.abstain ?? null, l.id);
+      if (c.current_legislation_id === l.id) {
+        closeCurrentSpeech(c);
+        q('UPDATE chambers SET current_legislation_id = NULL WHERE id = ?').run(c.id);
+      }
+    });
+    return done(c);
+  }));
+
+  app.post('/api/chambers/:id/ballot', wrap((req) => {
+    const { c, user } = loadChamber(req, 'competitor');
+    if (c.po_user_id === user.id) throw bad('The presiding officer does not vote except to break a tie.');
+    const { choice } = req.body || {};
+    if (!['yes', 'no', 'abstain'].includes(choice)) throw bad('Vote yes, no or abstain.');
+    const v = q(`SELECT * FROM vote_rounds WHERE chamber_id = ? AND status = 'open'`).get(c.id);
+    if (!v) throw bad('There is no open vote.');
+    q(`INSERT INTO ballots (vote_round_id, user_id, choice) VALUES (?, ?, ?)
+       ON CONFLICT (vote_round_id, user_id) DO UPDATE SET choice = excluded.choice`).run(v.id, user.id, choice);
+    return done(c);
+  }));
+
+  // ---------- competitor requests (rise to speak / question) ----------
+  app.post('/api/chambers/:id/requests', wrap((req) => {
+    const { c, user } = loadChamber(req, 'competitor');
+    const kind = (req.body || {}).kind;
+    if (!['aff', 'neg', 'question'].includes(kind)) throw bad('Bad request.');
+    if (c.po_user_id === user.id) throw bad('The presiding officer does not speak on legislation.');
+    if (kind !== 'question') q(`DELETE FROM speech_requests WHERE chamber_id = ? AND user_id = ? AND kind IN ('aff','neg')`).run(c.id, user.id);
+    q('INSERT OR REPLACE INTO speech_requests (chamber_id, user_id, kind, requested_at) VALUES (?, ?, ?, ?)').run(c.id, user.id, kind, Date.now());
+    return done(c);
+  }));
+  app.delete('/api/chambers/:id/requests/:kind', wrap((req) => {
+    const { c, user } = loadChamber(req, 'competitor');
+    q('DELETE FROM speech_requests WHERE chamber_id = ? AND user_id = ? AND kind = ?').run(c.id, user.id, req.params.kind);
+    return done(c);
+  }));
+  app.delete('/api/chambers/:id/requests', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    q('DELETE FROM speech_requests WHERE chamber_id = ?').run(c.id);
+    return done(c);
+  }));
+
+  // ---------- announcements ----------
+  app.post('/api/chambers/:id/announcements', wrap((req) => {
+    const { c, user } = loadChamber(req, 'chair');
+    const body = String((req.body || {}).body || '').trim();
+    if (!body) throw bad('Write something first.');
+    q('INSERT INTO announcements (chamber_id, author_id, body, created_at) VALUES (?, ?, ?, ?)').run(c.id, user.id, body.slice(0, 1000), Date.now());
+    return done(c);
+  }));
+  app.delete('/api/chambers/:id/announcements/:aid', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    q('DELETE FROM announcements WHERE id = ? AND chamber_id = ?').run(Number(req.params.aid), c.id);
+    return done(c);
+  }));
+
+  // ---------- judging (private to each judge) ----------
+  function checkPoints(c, p) {
+    const n = Number(p);
+    if (!Number.isInteger(n) || n < c.score_min || n > c.score_max) throw bad(`Points must be from ${c.score_min} to ${c.score_max}.`);
+    return n;
+  }
+  app.put('/api/chambers/:id/scores/:sid', wrap((req) => {
+    const { c, user } = loadChamber(req, 'judge');
+    const s = q('SELECT id FROM speeches WHERE id = ? AND chamber_id = ?').get(Number(req.params.sid), c.id);
+    if (!s) throw notFound('Speech not found.');
+    const b = req.body || {};
+    if (b.points === null || b.points === '') {
+      q('DELETE FROM speech_scores WHERE speech_id = ? AND judge_id = ?').run(s.id, user.id);
+      return { ok: true };
+    }
+    q(`INSERT INTO speech_scores (speech_id, judge_id, points, comment, updated_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (speech_id, judge_id) DO UPDATE SET points = excluded.points, comment = excluded.comment, updated_at = excluded.updated_at`)
+      .run(s.id, user.id, checkPoints(c, b.points), String(b.comment || '').slice(0, 2000), Date.now());
+    return { ok: true };
+  }));
+  app.put('/api/chambers/:id/po-score', wrap((req) => {
+    const { c, user } = loadChamber(req, 'judge');
+    const b = req.body || {};
+    const po = Number(b.po_user_id || c.po_user_id);
+    if (!po) throw bad('There is no presiding officer to score.');
+    q(`INSERT INTO po_scores (chamber_id, judge_id, po_user_id, points, comment, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (chamber_id, judge_id, po_user_id) DO UPDATE SET points = excluded.points, comment = excluded.comment, updated_at = excluded.updated_at`)
+      .run(c.id, user.id, po, checkPoints(c, b.points), String(b.comment || '').slice(0, 2000), Date.now());
+    return { ok: true };
+  }));
+  app.put('/api/chambers/:id/rankings', wrap((req) => {
+    const { c, user } = loadChamber(req, 'judge');
+    const ids = ((req.body || {}).user_ids || []).map(Number);
+    if (ids.length > c.rank_count) throw bad(`Rank at most ${c.rank_count} competitors.`);
+    if (new Set(ids).size !== ids.length) throw bad('Each competitor can be ranked only once.');
+    const ok = q(`SELECT 1 FROM chamber_members m JOIN users u ON u.id = m.user_id WHERE m.chamber_id = ? AND u.id = ? AND u.role = 'competitor'`);
+    for (const id of ids) if (!ok.get(c.id, id)) throw bad('You can only rank competitors in this chamber.');
+    tx(() => {
+      q('DELETE FROM rankings WHERE chamber_id = ? AND judge_id = ?').run(c.id, user.id);
+      const ins = q('INSERT INTO rankings (chamber_id, judge_id, user_id, rank) VALUES (?, ?, ?, ?)');
+      ids.forEach((id, i) => ins.run(c.id, user.id, id, i + 1));
+    });
+    return { ok: true };
+  }));
+
+  // ---------- state (what each role sees) ----------
+  function competitorsWithStats(c) {
+    const rows = q(`SELECT u.id, u.display_name, u.school, m.seat FROM chamber_members m JOIN users u ON u.id = m.user_id
+                    WHERE m.chamber_id = ? AND u.role = 'competitor' ORDER BY m.seat, u.display_name`).all(c.id);
+    const sp = new Map(q(`SELECT speaker_id, COUNT(*) n, MAX(recognized_at) last FROM speeches WHERE chamber_id = ? GROUP BY speaker_id`).all(c.id).map((r) => [r.speaker_id, r]));
+    const qs = new Map(q(`SELECT questioner_id, COUNT(*) n, MAX(asked_at) last FROM questions WHERE chamber_id = ? GROUP BY questioner_id`).all(c.id).map((r) => [r.questioner_id, r]));
+    return rows.map((r) => ({
+      ...r,
+      is_po: r.id === c.po_user_id,
+      speeches: sp.get(r.id)?.n || 0,
+      last_speech_at: sp.get(r.id)?.last || null,
+      questions: qs.get(r.id)?.n || 0,
+      last_question_at: qs.get(r.id)?.last || null,
+    }));
+  }
+  // Precedence: fewest speeches first, then whoever spoke least recently (never spoken beats any), then seat order.
+  function precedence(list, countKey, lastKey) {
+    return [...list].sort((a, b) => (a[countKey] - b[countKey])
+      || ((a[lastKey] ?? -1) - (b[lastKey] ?? -1))
+      || ((a.seat ?? 0) - (b.seat ?? 0)));
+  }
+
+  app.get('/api/chambers/:id/state', wrap((req) => {
+    const { c, user, m } = loadChamber(req);
+    const comps = competitorsWithStats(c);
+    const speakers = comps.filter((x) => !x.is_po);
+    const nameOf = new Map(comps.map((x) => [x.id, x.display_name]));
+    const judges = q(`SELECT u.id, u.display_name, u.school FROM chamber_members m JOIN users u ON u.id = m.user_id
+                      WHERE m.chamber_id = ? AND u.role = 'judge' ORDER BY u.display_name`).all(c.id);
+    const legislation = q('SELECT * FROM legislation WHERE chamber_id = ? ORDER BY docket_order, id').all(c.id);
+    const speeches = q(`SELECT s.*, u.display_name speaker_name, l.title legislation_title FROM speeches s
+                        JOIN users u ON u.id = s.speaker_id JOIN legislation l ON l.id = s.legislation_id
+                        WHERE s.chamber_id = ? ORDER BY s.recognized_at`).all(c.id);
+    const questions = q(`SELECT q.id, q.speech_id, q.questioner_id, q.asked_at FROM questions q WHERE q.chamber_id = ? ORDER BY q.asked_at`).all(c.id)
+      .map((x) => ({ ...x, questioner_name: nameOf.get(x.questioner_id) }));
+    const requests = q('SELECT user_id, kind, requested_at FROM speech_requests WHERE chamber_id = ? ORDER BY requested_at').all(c.id)
+      .map((x) => ({ ...x, name: nameOf.get(x.user_id) }));
+    const motions = q('SELECT * FROM motions WHERE chamber_id = ? ORDER BY created_at DESC').all(c.id)
+      .map((x) => ({ ...x, label: MOTIONS[x.kind]?.label || x.kind, mover_name: nameOf.get(x.mover_id) || null }));
+    const announcements = q('SELECT id, body, created_at FROM announcements WHERE chamber_id = ? ORDER BY created_at DESC LIMIT 20').all(c.id);
+
+    const targetLabel = (v) => v.target_type === 'legislation'
+      ? (legislation.find((l) => l.id === v.target_id)?.title || 'Legislation')
+      : (motions.find((x) => x.id === v.target_id)?.label || 'Motion');
+    const openRow = q(`SELECT * FROM vote_rounds WHERE chamber_id = ? AND status = 'open'`).get(c.id);
+    let open_vote = null;
+    if (openRow) {
+      const t = tally(openRow.id);
+      const mine = q('SELECT choice FROM ballots WHERE vote_round_id = ? AND user_id = ?').get(openRow.id, user.id);
+      open_vote = {
+        id: openRow.id, target_type: openRow.target_type, target_id: openRow.target_id, label: targetLabel(openRow),
+        threshold: openRow.threshold, eligible: speakers.length, cast: t.yes + t.no + t.abstain,
+        my_choice: mine?.choice || null, tally: m.canChair ? t : null,
+      };
+    }
+    const past_votes = q(`SELECT * FROM vote_rounds WHERE chamber_id = ? AND status = 'closed' ORDER BY closed_at DESC LIMIT 15`).all(c.id)
+      .map((v) => ({ id: v.id, label: targetLabel(v), target_type: v.target_type, result: v.result, threshold: v.threshold, tally: tally(v.id) }));
+
+    // Suggested next side on the current item: authorship first, then alternate.
+    let next_side = null;
+    if (c.current_legislation_id) {
+      const onItem = speeches.filter((s) => s.legislation_id === c.current_legislation_id);
+      const last = onItem[onItem.length - 1];
+      next_side = !last ? 'authorship' : (last.side === 'neg' ? 'aff' : 'neg');
+    }
+
+    const out = {
+      server_now: Date.now(),
+      me: { id: user.id, name: user.display_name, role: user.role, ...m },
+      chamber: {
+        id: c.id, name: c.name, status: c.status, po_user_id: c.po_user_id, po_name: nameOf.get(c.po_user_id) || null,
+        current_legislation_id: c.current_legislation_id, current_speech_id: c.current_speech_id,
+        score_min: c.score_min, score_max: c.score_max, rank_count: c.rank_count,
+        speech_seconds: c.speech_seconds, authorship_question_seconds: c.authorship_question_seconds, question_seconds: c.question_seconds,
+        timer: c.timer_duration == null ? null : {
+          label: c.timer_label, duration: c.timer_duration, running: !!c.timer_started_at,
+          started_at: c.timer_started_at, elapsed_ms: c.timer_elapsed_ms,
+        },
+        next_side,
+      },
+      competitors: comps,
+      judges,
+      speaking_precedence: precedence(speakers, 'speeches', 'last_speech_at').map((x) => x.id),
+      question_precedence: precedence(speakers, 'questions', 'last_question_at').map((x) => x.id),
+      legislation, speeches, questions, requests, motions, announcements, open_vote, past_votes,
+      motion_kinds: Object.entries(MOTIONS).map(([k, v]) => ({ kind: k, ...v })),
+    };
+    if (m.isJudge) {
+      out.my_scores = Object.fromEntries(q(`SELECT ss.speech_id, ss.points, ss.comment FROM speech_scores ss JOIN speeches s ON s.id = ss.speech_id
+                                            WHERE s.chamber_id = ? AND ss.judge_id = ?`).all(c.id, user.id).map((r) => [r.speech_id, { points: r.points, comment: r.comment }]));
+      out.my_po_scores = q('SELECT po_user_id, points, comment FROM po_scores WHERE chamber_id = ? AND judge_id = ?').all(c.id, user.id);
+      out.my_rankings = q('SELECT user_id FROM rankings WHERE chamber_id = ? AND judge_id = ? ORDER BY rank').all(c.id, user.id).map((r) => r.user_id);
+    }
+    return out;
+  }));
+
+  // ---------- results (admin only) ----------
+  function computeResults(c) {
+    const comps = competitorsWithStats(c);
+    const judges = q(`SELECT u.id, u.display_name FROM chamber_members m JOIN users u ON u.id = m.user_id
+                      WHERE m.chamber_id = ? AND u.role = 'judge' ORDER BY u.display_name`).all(c.id);
+    const scores = q(`SELECT s.speaker_id, ss.judge_id, ss.points FROM speech_scores ss JOIN speeches s ON s.id = ss.speech_id WHERE s.chamber_id = ?`).all(c.id);
+    const po = q('SELECT judge_id, po_user_id, points FROM po_scores WHERE chamber_id = ?').all(c.id);
+    const ranks = q('SELECT judge_id, user_id, rank FROM rankings WHERE chamber_id = ?').all(c.id);
+    const unranked = c.rank_count + 1;
+    const rows = comps.map((p) => {
+      const mine = scores.filter((s) => s.speaker_id === p.id);
+      const poMine = po.filter((s) => s.po_user_id === p.id);
+      const all = [...mine, ...poMine];
+      const total = all.reduce((a, s) => a + s.points, 0);
+      const by_judge = judges.map((j) => {
+        const r = ranks.find((x) => x.judge_id === j.id && x.user_id === p.id);
+        return { judge_id: j.id, rank: r ? r.rank : null, points: all.filter((s) => s.judge_id === j.id).reduce((a, s) => a + s.points, 0) };
+      });
+      const judgesWhoRanked = judges.filter((j) => ranks.some((r) => r.judge_id === j.id));
+      const rank_total = judgesWhoRanked.reduce((a, j) => a + (by_judge.find((b) => b.judge_id === j.id).rank ?? unranked), 0);
+      return {
+        id: p.id, name: p.display_name, school: p.school, was_po: poMine.length > 0 || p.is_po,
+        speeches: p.speeches, questions: p.questions,
+        total_points: total, average_points: all.length ? Math.round((total / all.length) * 100) / 100 : null,
+        rank_total, by_judge,
+      };
+    });
+    // Order by sum of judge ranks (lower is better), then total points.
+    rows.sort((a, b) => (a.rank_total - b.rank_total) || (b.total_points - a.total_points) || a.name.localeCompare(b.name));
+    rows.forEach((r, i) => { r.place = i + 1; });
+    const progress = judges.map((j) => ({
+      judge_id: j.id, name: j.display_name,
+      scored: scores.filter((s) => s.judge_id === j.id).length,
+      ranked: ranks.filter((r) => r.judge_id === j.id).length,
+      po_scored: po.some((s) => s.judge_id === j.id),
+    }));
+    return { judges, rows, progress, total_speeches: q('SELECT COUNT(*) n FROM speeches WHERE chamber_id = ?').get(c.id).n, unranked_value: unranked };
+  }
+  app.get('/api/chambers/:id/results', wrap((req) => {
+    const { c } = loadChamber(req, 'admin');
+    return computeResults(c);
+  }));
+  app.get('/api/chambers/:id/results.csv', wrap((req, res) => {
+    const { c } = loadChamber(req, 'admin');
+    const r = computeResults(c);
+    const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const head = ['Place', 'Name', 'School', 'Speeches', 'Questions', 'Total points', 'Average', 'Rank total',
+      ...r.judges.flatMap((j) => [`${j.display_name} rank`, `${j.display_name} points`])];
+    const lines = [head.map(esc).join(',')];
+    for (const row of r.rows) {
+      lines.push([row.place, row.name + (row.was_po ? ' (PO)' : ''), row.school, row.speeches, row.questions, row.total_points, row.average_points, row.rank_total,
+        ...row.by_judge.flatMap((b) => [b.rank ?? '', b.points])].map(esc).join(','));
+    }
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="chamber-${c.id}-results.csv"`);
+    res.send(lines.join('\n'));
+  }));
+
+  app.get('/api/chambers/:id/events', (req, res) => {
+    try { loadChamber(req); } catch (e) { return res.status(e.status || 500).end(); }
+    const id = Number(req.params.id);
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+    res.write('retry: 3000\n\n');
+    if (!listeners.has(id)) listeners.set(id, new Set());
+    listeners.get(id).add(res);
+    req.on('close', () => listeners.get(id)?.delete(res));
+  });
+
+  app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
+  app.use(express.static(publicDir));
+  app.get('*', (_req, res) => res.sendFile(path.join(publicDir, 'index.html')));
+
+  app.locals.close = () => clearInterval(heartbeat);
+  return app;
+}
+
+module.exports = { createApp, hashPassword };
