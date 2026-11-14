@@ -41,6 +41,10 @@ Demo logins after `npm run seed`: `admin`, `judge1`, `judge2`, `jules` (presidin
 npm test         # runs a full chamber session end to end over HTTP
 ```
 
+## Try it from GitHub (Codespaces)
+
+On the repo page, click **Code → Codespaces → Create codespace on main**. It installs, loads the demo chamber and starts the app by itself. To let other people in, open the **Ports** tab, right-click port 3000 and set **Port visibility → Public**, then share that URL. The codespace sleeps after about 30 idle minutes (raise this in your GitHub Codespaces settings); data is kept until you delete the codespace. Good for trying it out, not for a real tournament.
+
 ## Deploy
 
 It is one Node process plus one SQLite file, so it needs a host with a persistent disk.
