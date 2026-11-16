@@ -111,3 +111,15 @@ button.next { outline: 3px solid var(--warn); outline-offset: 1px; }
 .grid-ballot select { min-width: 64px; min-height: 36px; padding: 4px 6px; }
 .grid-ballot td.missing select { border-color: var(--warn); }
 tr.me td { background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 600; }
+
+/* Teams */
+.cite { font-size: 13px; color: var(--muted); border-left: 3px solid var(--line); padding-left: 8px; margin-top: 4px; }
+.item-form { margin-top: 8px; }
+.section-aff { border-top: 4px solid var(--aff); } .section-neg { border-top: 4px solid var(--neg); }
+.section-evidence { border-top: 4px solid var(--accent); } .section-question { border-top: 4px solid var(--warn); }
+.pill.plan-ready, .pill.plan-delivered { background: var(--aff); color: #fff; } .pill.plan-drafting { background: var(--warn); color: #fff; }
+.stats { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.stat .n { font-size: 30px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.code { font-family: ui-monospace, monospace; font-size: 24px; font-weight: 800; letter-spacing: 3px; background: var(--bg); padding: 4px 10px; border-radius: 6px; }
+.strike { text-decoration: line-through; }
+.whoami a { margin-right: 4px; }

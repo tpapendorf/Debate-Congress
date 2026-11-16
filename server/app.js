@@ -1115,6 +1115,8 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     req.on('close', () => listeners.get(id)?.delete(res));
   });
 
+  require('./teams')(app, { db, q, tx, wrap, requireUser, bad, forbidden, notFound, hashPassword, startSession, makeUsername });
+
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
   app.use(express.static(publicDir));
   app.get('*', (_req, res) => res.sendFile(path.join(publicDir, 'index.html')));

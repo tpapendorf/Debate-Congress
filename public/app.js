@@ -57,6 +57,7 @@ async function route() {
   renderWho();
   document.body.classList.remove('wide');
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
+  if (parts[0] === 'signup' && !me) return renderSignup(parts[1] || '');
   if (!me) {
     closeEvents();
     const setup = await api('GET', '/api/setup');
@@ -74,6 +75,9 @@ async function route() {
   tracker = null;
   if (parts[0] === 'tracker') return renderTrackerList();
   if (parts[0] === 'users' && me.role === 'admin') return renderUsers();
+  if (parts[0] === 'signup') return renderTeams();
+  if (parts[0] === 'teams') return renderTeams();
+  if (parts[0] === 'team' && parts[1]) return renderTeam(Number(parts[1]), parts[2] || 'research', parts[3], parts[4]);
   if (parts[0] === 'account') return renderAccount();
   return renderHome();
 }
@@ -81,7 +85,7 @@ function currentTab() { return location.hash.split('/')[3] || 'floor'; }
 
 function renderWho() {
   $who.innerHTML = me
-    ? `<span>${esc(me.display_name)} · ${esc(me.role)}</span><a href="#/account">Account</a><button class="ghost sm" data-act="logout">Sign out</button>`
+    ? `<a href="#/teams">Teams</a><span>${esc(me.display_name)} · ${esc(me.role)}</span><a href="#/account">Account</a><button class="ghost sm" data-act="logout">Sign out</button>`
     : '';
 }
 
@@ -153,7 +157,7 @@ function renderLogin() {
       <div class="field"><label>Username</label><input name="username" autocomplete="username" autocapitalize="none" required></div>
       <div class="field"><label>Password</label><input name="password" type="password" autocomplete="current-password" required></div>
       <button class="primary" style="width:100%;justify-content:center">Sign in</button>
-      <p class="muted small">Your tournament admin gives you a username and password.</p>
+      <p class="muted small">Your tournament admin gives you a username and password. Joining a team? <a href="#/signup">Sign up with your team's join code</a>.</p>
     </form>`;
 }
 function renderSetup() {
