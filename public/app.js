@@ -9,7 +9,8 @@ let chamberId = null;
 let events = null;         // EventSource for live updates
 let clockOffset = 0;       // server time minus local time
 let pendingRender = false; // deferred re-render while someone is typing
-let ui = { recognizeSide: null, results: null, rankDraft: null, userFlash: null };
+let ui = { recognizeSide: null, results: null, rankDraft: null, userFlash: null, viewAs: null, dashList: 'speak' };
+let tracker = null;        // personal tracker being edited ({ id, name, data })
 
 // ---------- utilities ----------
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
@@ -26,7 +27,10 @@ function toast(msg, isError) {
   clearTimeout(toast._t); toast._t = setTimeout(() => { t.hidden = true; }, isError ? 4500 : 2200);
 }
 async function api(method, url, body) {
-  const res = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  const headers = body ? { 'Content-Type': 'application/json' } : {};
+  // Admins in a mock tournament can act as one of its made-up people.
+  if (ui.viewAs && chamberId && url.startsWith(`/api/chambers/${chamberId}/`)) headers['X-View-As'] = String(ui.viewAs);
+  const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const data = res.headers.get('content-type')?.includes('json') ? await res.json() : null;
   if (res.status === 401 && !url.startsWith('/api/login')) { me = null; go('#/login'); throw new Error('Please sign in.'); }
   if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
@@ -51,6 +55,7 @@ async function route() {
     try { me = (await api('GET', '/api/me')).user; } catch { me = null; }
   }
   renderWho();
+  document.body.classList.remove('wide');
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   if (!me) {
     closeEvents();
@@ -59,11 +64,15 @@ async function route() {
   }
   if (parts[0] === 'c' && parts[1]) {
     const id = Number(parts[1]);
-    if (id !== chamberId) { chamberId = id; state = null; ui = { ...ui, results: null, rankDraft: null }; openEvents(); }
+    tracker = null;
+    if (id !== chamberId) { chamberId = id; state = null; ui = { ...ui, results: null, rankDraft: null, viewAs: null }; openEvents(); }
     if (!state) await loadState(); else render();
     return;
   }
   closeEvents(); chamberId = null; state = null;
+  if (parts[0] === 'tracker' && parts[1]) return openTracker(Number(parts[1]));
+  tracker = null;
+  if (parts[0] === 'tracker') return renderTrackerList();
   if (parts[0] === 'users' && me.role === 'admin') return renderUsers();
   if (parts[0] === 'account') return renderAccount();
   return renderHome();
@@ -101,17 +110,22 @@ function isTyping() {
   return a && $view.contains(a) && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && a.type !== 'button') || a.tagName === 'SELECT');
 }
 function render() {
-  if (!state) return;
+  if (!state && !tracker) return;
   if (isTyping()) { pendingRender = true; return; }
   pendingRender = false;
-  renderChamber();
+  if (tracker) renderTracker(); else renderChamber();
 }
 document.addEventListener('focusout', () => setTimeout(() => { if (pendingRender && !isTyping()) render(); }, 50));
 
 // ---------- timer ----------
-function timerRemaining(t) {
+// The timer on screen belongs to the chamber (server clock) or to a personal tracker (this device's clock).
+function activeTimer() {
+  if (tracker) return { t: tracker.data.timer, offset: 0 };
+  return { t: state?.chamber?.timer, offset: clockOffset };
+}
+function timerRemaining(t, offset = activeTimer().offset) {
   if (!t) return null;
-  const elapsed = t.elapsed_ms + (t.running ? (Date.now() + clockOffset - t.started_at) : 0);
+  const elapsed = t.elapsed_ms + (t.running ? (Date.now() + offset - t.started_at) : 0);
   return t.duration - elapsed / 1000;
 }
 function timerHtml(t) {
@@ -119,9 +133,9 @@ function timerHtml(t) {
   return `<div class="timer" data-timer>${fmtSecs(timerRemaining(t))}</div>`;
 }
 setInterval(() => {
-  const t = state?.chamber?.timer;
+  const { t, offset } = activeTimer();
   for (const el of document.querySelectorAll('[data-timer]')) {
-    const r = timerRemaining(t);
+    const r = timerRemaining(t, offset);
     if (r == null) continue;
     el.textContent = fmtSecs(r);
     el.classList.toggle('over', r < 0);
@@ -171,13 +185,17 @@ async function renderHome() {
     ${admin ? `<div class="card"><form class="row" data-form="new-chamber">
         <input name="name" placeholder="New chamber name, e.g. House Prelims Chamber A" required style="flex:1;min-width:200px">
         <button class="primary">Create chamber</button></form>
-        <p class="small muted" style="margin-bottom:0"><a href="#/users">Manage people and logins →</a></p></div>` : ''}
+        <div class="spread" style="margin-top:10px"><a class="small" href="#/users">Manage people and logins →</a>
+        <button class="sm" data-act="make-mock">Create a mock tournament for testing</button></div></div>` : ''}
     <div class="card">
       ${chambers.length ? `<ul class="list">${chambers.map((c) => `
         <li class="spread"><a href="#/c/${c.id}/floor"><strong>${esc(c.name)}</strong></a>
-        <span class="row">${c.is_po ? '<span class="pill">You preside</span>' : ''}<span class="pill">${esc(STATUS_LABEL[c.status])}</span></span></li>`).join('')}</ul>`
+        <span class="row">${c.is_mock ? '<span class="pill debating">Mock</span>' : ''}${c.is_po ? '<span class="pill">You preside</span>' : ''}<span class="pill">${esc(STATUS_LABEL[c.status])}</span></span></li>`).join('')}</ul>`
         : `<p class="muted">${admin ? 'No chambers yet. Create one above.' : 'You are not assigned to a chamber yet. Ask your tournament admin.'}</p>`}
-    </div>`;
+    </div>
+    <div class="card spread"><div><h2 style="margin:0">Personal tracker</h2>
+      <p class="small muted" style="margin:4px 0 0">Track precedence, recency and a timer on your own, for any chamber. Only you can see it.</p></div>
+      <a class="btn" href="#/tracker">Open my trackers</a></div>`;
 }
 
 // ---------- users (admin) ----------
@@ -223,7 +241,7 @@ async function renderUsers() {
 // ---------- chamber shell ----------
 function tabsFor(m) {
   const t = [['floor', 'Floor']];
-  if (m.canChair) t.push(['chair', m.isPO ? 'Preside' : 'Chair controls']);
+  if (m.canChair) t.push(['chair', 'Dashboard']);
   if (m.isJudge) t.push(['score', 'Score']);
   t.push(['docket', 'Docket'], ['log', 'Speech log']);
   if (m.isAdmin) t.push(['setup', 'Setup'], ['results', 'Results']);
@@ -235,8 +253,15 @@ function renderChamber() {
   let tab = currentTab();
   if (!tabs.some(([k]) => k === tab)) tab = 'floor';
   const body = { floor: viewFloor, chair: viewChair, score: viewScore, docket: viewDocket, log: viewLog, setup: viewSetup, results: viewResults }[tab]();
+  document.body.classList.toggle('wide', tab === 'chair');
+  const viewAs = s.view_as_options ? `<div class="card viewas row">
+      <strong>Mock tournament.</strong> <label for="viewas" style="margin:0">View as</label>
+      <select id="viewas" data-viewas style="width:auto;flex:1;min-width:200px"><option value="">Myself (admin)</option>
+      ${s.view_as_options.map((u) => `<option value="${u.id}" ${ui.viewAs === u.id ? 'selected' : ''}>${esc(u.display_name)} · ${u.is_po ? 'presiding officer' : esc(u.role)}</option>`).join('')}</select>
+      ${m.viewingAs ? '<span class="small">Everything you do now counts as this person, so you can vote, rise and score as them.</span>' : ''}</div>` : '';
   $view.innerHTML = `
-    <div class="spread"><h1>${esc(c.name)}</h1><span class="row"><span class="pill">${esc(STATUS_LABEL[c.status])}</span>
+    ${viewAs}
+    <div class="spread"><h1>${esc(c.name)}</h1><span class="row">${s.is_mock ? '<span class="pill debating">Mock</span>' : ''}<span class="pill">${esc(STATUS_LABEL[c.status])}</span>
       ${c.po_name ? `<span class="pill">PO: ${esc(c.po_name)}</span>` : ''}</span></div>
     <nav class="tabs">${tabs.map(([k, label]) => `<a href="#/c/${c.id}/${k}" class="${k === tab ? 'active' : ''}">${label}</a>`).join('')}</nav>
     ${body}`;
@@ -306,56 +331,123 @@ function viewFloor() {
     </div>`;
 }
 
-// ---------- Chair / PO controls ----------
+// ---------- Dashboard (shared by the chamber and personal trackers) ----------
+// model: { scope, timer, title, speaker, nextSide, people[], order{speak,question}, ruleOrder{speak,question}, canQuestion, qSecs }
+function ordinal(n) { const s = ['th', 'st', 'nd', 'rd'], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); }
+function dashTimer(model) {
+  const t = model.timer, sc = model.scope;
+  return `<div class="card dash-timer">
+    <div class="muted small">${model.title ? esc(model.title) : 'No item on the floor'}</div>
+    <div class="who">${model.speaker ? `${esc(model.speaker.name)} <span class="pill ${model.speaker.side}">${SIDE_LABEL[model.speaker.side]}</span>` : '<span class="muted">Floor is open</span>'}</div>
+    <div class="muted small">${esc(t?.label || 'Timer')}${t && !t.running ? ' · paused' : ''}</div>
+    ${timerHtml(t)}
+    <div class="row" style="justify-content:center;margin-top:12px">
+      ${t ? `<button class="${t.running ? '' : 'primary'}" data-act="d-timer" data-scope="${sc}" data-a="${t.running ? 'pause' : 'resume'}" title="Space bar">${t.running ? 'Pause' : 'Start'}</button>
+             <button data-act="d-timer" data-scope="${sc}" data-a="reset">Reset</button>` : ''}
+      ${model.speaker ? `<button data-act="d-questioning" data-scope="${sc}">Questioning ${fmtSecs(model.qSecs)}</button>
+                         <button data-act="d-end" data-scope="${sc}">End speech</button>` : ''}
+    </div>
+    <form class="row" data-form="d-custom-timer" data-scope="${sc}" style="justify-content:center;margin-top:8px">
+      <input name="label" placeholder="Other timer (e.g. Recess)" style="width:auto;flex:2;min-width:120px"><input name="minutes" type="number" min="0.25" step="0.25" placeholder="Minutes" style="width:auto;flex:1;min-width:80px">
+      <button class="sm">Set</button></form>
+    <p class="small muted" style="margin:8px 0 0">Space bar starts and pauses the timer.</p>
+  </div>`;
+}
+function dashList(model) {
+  const sc = model.scope, kind = ui.dashList;
+  const order = model.order[kind], rule = model.ruleOrder[kind];
+  const adjusted = JSON.stringify(order) !== JSON.stringify(rule);
+  const people = new Map(model.people.map((p) => [p.id, p]));
+  const spokeOrder = model.people.filter((p) => p.lastSpeech).sort((a, b) => b.lastSpeech - a.lastSpeech).map((p) => p.id);
+  const askOrder = model.people.filter((p) => p.lastQuestion).sort((a, b) => b.lastQuestion - a.lastQuestion).map((p) => p.id);
+  const sides = ['authorship', 'aff', 'neg'];
+  const rows = order.map((id, i) => {
+    const p = people.get(id);
+    if (!p) return '';
+    const sr = spokeOrder.indexOf(id), qr = askOrder.indexOf(id);
+    const actions = kind === 'speak'
+      ? sides.map((sd) => `<button class="sm ${sd === 'authorship' ? '' : sd} " data-act="d-recognize" data-scope="${sc}" data-id="${id}" data-side="${sd}" ${model.title ? '' : 'disabled'} title="Recognize for ${SIDE_LABEL[sd]}">${sd === 'authorship' ? 'Auth' : sd === 'aff' ? 'Aff' : 'Neg'}</button>`).join('')
+      : `<button class="sm primary" data-act="d-question" data-scope="${sc}" data-id="${id}" ${model.canQuestion && !p.speaking ? '' : 'disabled'}>Question</button>`;
+    return `<tr draggable="true" data-drag-id="${id}" class="${p.speaking ? 'speaking' : ''}">
+      <td class="handle" title="Drag to reorder">⠿</td>
+      <td class="num">${i + 1}</td>
+      <td><strong>${esc(p.name)}</strong>${p.school ? ` <span class="small muted">${esc(p.school)}</span>` : ''}
+        ${p.speaking ? ' <span class="pill debating">has the floor</span>' : ''}
+        ${(p.tags || []).filter((t) => (kind === 'speak') === (t !== 'question')).map((t) => `<span class="pill ${t === 'question' ? '' : t}">${t === 'question' ? 'wants to ask' : 'rose ' + (t === 'aff' ? 'aff' : 'neg')}</span>`).join(' ')}</td>
+      <td class="num">${p.speeches}</td>
+      <td class="small">${p.lastSpeech ? `${fmtTime(p.lastSpeech)} <span class="muted">· ${sr === 0 ? 'most recent' : ordinal(sr + 1) + ' most recent'}</span>` : '<span class="muted">not yet</span>'}</td>
+      <td class="num">${p.questions}</td>
+      <td class="small">${p.lastQuestion ? `${fmtTime(p.lastQuestion)}${qr === 0 ? ' <span class="muted">· most recent</span>' : ''}` : '<span class="muted">—</span>'}</td>
+      <td class="row nowrap">${actions}
+        <span class="movers"><button class="sm ghost" data-act="d-move" data-scope="${sc}" data-id="${id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} title="Move up">↑</button><button class="sm ghost" data-act="d-move" data-scope="${sc}" data-id="${id}" data-dir="1" ${i === order.length - 1 ? 'disabled' : ''} title="Move down">↓</button></span></td>
+    </tr>`;
+  }).join('');
+  return `<div class="card dash-list">
+    <div class="spread">
+      <div class="seg"><button class="${kind === 'speak' ? 'on' : ''}" data-act="d-list" data-kind="speak">Speaking order</button><button class="${kind === 'question' ? 'on' : ''}" data-act="d-list" data-kind="question">Questioning order</button></div>
+      <div class="row">${adjusted ? '<span class="small warn-text">Adjusted by hand</span>' : '<span class="small muted">Following the rule</span>'}
+        <button class="sm" data-act="d-queue" data-scope="${sc}" data-a="reset" ${adjusted ? '' : 'disabled'}>Reset to rule</button>
+        <button class="sm" data-act="d-queue" data-scope="${sc}" data-a="shuffle" title="Random order among people tied on count">Random draw</button></div>
+    </div>
+    <p class="small muted">${kind === 'speak'
+      ? `Top of the list has precedence: fewest speeches, then longest since speaking. Recognizing someone moves them to the bottom. Drag rows to fix mistakes or set a starting order.${model.nextSide ? ` Next expected: <strong>${SIDE_LABEL[model.nextSide]}</strong>.` : ''}`
+      : 'Top of the list asks next: fewest questions, then longest since asking. Logging a question moves them to the bottom.'}</p>
+    ${model.people.length ? `<div class="table-wrap"><table class="dash-table">
+      <tr><th></th><th>#</th><th>Name</th><th>Speeches</th><th>Last spoke</th><th>Qs</th><th>Last asked</th><th>${kind === 'speak' ? `Recognize${model.nextSide ? ` <span class="pill ${model.nextSide}">next: ${SIDE_LABEL[model.nextSide]}</span>` : ''}` : 'Log'}</th></tr>
+      ${rows}</table></div>` : `<p class="muted">No competitors yet.</p>`}
+  </div>`;
+}
+
+function chamberDashModel() {
+  const s = state, c = s.chamber, leg = currentLeg(), sp = currentSpeech();
+  const lastQ = new Map();
+  for (const q of s.questions) lastQ.set(q.questioner_id, q.asked_at);
+  return {
+    scope: 'chamber', timer: c.timer, title: leg?.title, nextSide: leg ? c.next_side : null,
+    speaker: sp ? { name: sp.speaker_name, side: sp.side } : null,
+    qSecs: sp && ['authorship', 'sponsorship'].includes(sp.side) ? c.authorship_question_seconds : c.question_seconds,
+    canQuestion: !!sp,
+    people: s.competitors.filter((p) => !p.is_po).map((p) => ({
+      id: p.id, name: p.display_name, school: p.school, speeches: p.speeches, questions: p.questions,
+      lastSpeech: p.last_speech_at, lastQuestion: p.last_question_at, speaking: sp?.speaker_id === p.id,
+      tags: s.requests.filter((r) => r.user_id === p.id).map((r) => r.kind),
+    })),
+    order: { speak: s.speaking_precedence, question: s.question_precedence },
+    ruleOrder: { speak: s.speaking_rule_order, question: s.question_rule_order },
+  };
+}
+
 function viewChair() {
   const s = state, c = s.chamber, leg = currentLeg(), sp = currentSpeech();
-  const side = ui.recognizeSide || c.next_side || 'aff';
-  const t = c.timer;
   const pendingItems = s.legislation.filter((l) => ['pending', 'debating'].includes(l.status) && l.id !== c.current_legislation_id);
   const qs = sp ? s.questions.filter((q) => q.speech_id === sp.id) : [];
   const motionsOpen = s.motions.filter((x) => ['pending', 'voting'].includes(x.status));
   const competitorsOpts = s.competitors.filter((p) => !p.is_po).map((p) => `<option value="${p.id}">${esc(p.display_name)}</option>`).join('');
+  const model = chamberDashModel();
   return `
     ${voteBanner()}
     ${s.open_vote ? `<div class="card row"><button class="primary" data-act="close-vote" data-id="${s.open_vote.id}">Close vote and announce result</button>
        <button data-act="cancel-vote" data-id="${s.open_vote.id}">Cancel vote</button></div>` : ''}
-    <div class="grid side">
-      <div>
-        ${floorCard()}
-        <div class="card"><h2>Timer</h2><div class="row">
-          ${t ? (t.running ? '<button data-act="timer" data-a="pause">Pause</button>' : '<button class="primary" data-act="timer" data-a="resume">Start / resume</button>') : ''}
-          ${t ? '<button data-act="timer" data-a="reset">Reset</button>' : ''}
-          ${sp ? `<button data-act="questioning">Start questioning (${fmtSecs(['authorship', 'sponsorship'].includes(sp.side) ? c.authorship_question_seconds : c.question_seconds)})</button>
-                  <button data-act="end-speech">End speech, open floor</button>` : ''}
-        </div>
-        <form class="row" data-form="custom-timer" style="margin-top:8px">
-          <input name="label" placeholder="Custom timer label" style="flex:2;min-width:140px"><input name="seconds" type="number" min="1" placeholder="Seconds" style="flex:1;min-width:90px">
-          <button class="sm">Set</button></form></div>
-        ${leg ? `<div class="card"><h2>Recognize a speaker</h2>
-          <div class="row" style="margin-bottom:8px">${['authorship', 'sponsorship', 'aff', 'neg'].map((k) => `<button class="sm ${k === side ? 'on' : ''} ${k}" data-act="pick-side" data-side="${k}">${SIDE_LABEL[k]}</button>`).join('')}</div>
-          <p class="small muted">Next expected: <strong>${SIDE_LABEL[c.next_side] || '—'}</strong>. Listed by precedence; tags show who rose for which side.</p>
-          ${precedenceList(s.speaking_precedence, 'speeches', { button: (p) => `<button class="sm primary" data-act="recognize" data-id="${p.id}">Recognize</button>` })}
-        </div>` : `<div class="card"><h2>Next item</h2><p class="muted">Choose an item from the docket to begin debate.</p></div>`}
-        ${sp ? `<div class="card"><h2>Questioners for ${esc(sp.speaker_name)}</h2>
-          ${qs.length ? `<ul class="list">${qs.map((q) => `<li class="spread">${esc(q.questioner_name)} <button class="sm ghost" data-act="del-question" data-id="${q.id}">Undo</button></li>`).join('')}</ul>` : '<p class="muted small">None logged yet.</p>'}
-          <h3>Question precedence</h3>
-          ${precedenceList(s.question_precedence.filter((id) => id !== sp.speaker_id), 'questions', { button: (p) => `<button class="sm" data-act="question" data-id="${p.id}">Log question</button>` })}
-        </div>` : ''}
+    <div class="dash">
+      <div class="dash-main">
+        ${dashList(model)}
       </div>
-      <div>
+      <div class="dash-side">
+        ${dashTimer(model)}
+        ${sp && qs.length ? `<div class="card"><h2>Questions for ${esc(sp.speaker_name)}</h2><ul class="list">${qs.map((q) => `<li class="spread">${esc(q.questioner_name)} <button class="sm ghost" data-act="del-question" data-id="${q.id}">Undo</button></li>`).join('')}</ul></div>` : ''}
         <div class="card"><h2>Session</h2><div class="row">
           ${c.status !== 'in_session' ? '<button class="primary" data-act="status" data-status="in_session">Call to order</button>' : '<button data-act="status" data-status="recess">Recess</button>'}
           ${c.status !== 'adjourned' ? '<button data-act="status" data-status="adjourned">Adjourn</button>' : ''}
           ${s.requests.length ? '<button data-act="clear-requests">Clear everyone standing</button>' : ''}
         </div></div>
         <div class="card"><h2>Docket</h2>
-          ${leg ? `<p>On the floor: <strong>${esc(leg.title)}</strong></p><div class="row">
+          ${leg ? `<p style="margin-top:0">On the floor: <strong>${esc(leg.title)}</strong></p><div class="row">
             <button class="primary" data-act="open-vote" data-type="legislation" data-id="${leg.id}" ${s.open_vote ? 'disabled' : ''}>Vote on ${esc(leg.kind)}</button>
             </div>
             <details style="margin-top:8px"><summary class="small">Record a hand vote instead</summary>
               <form class="inline-fields" data-form="hand-vote" data-id="${leg.id}" style="margin-top:8px">
                 <input name="yes" type="number" min="0" placeholder="Yea"><input name="no" type="number" min="0" placeholder="Nay"><input name="abstain" type="number" min="0" placeholder="Abstain">
-                <select name="status"><option value="passed">Passed</option><option value="failed">Failed</option></select><button class="sm">Record</button></form></details>` : ''}
+                <select name="status"><option value="passed">Passed</option><option value="failed">Failed</option></select><button class="sm">Record</button></form></details>` : '<p class="muted small" style="margin-top:0">Pick an item to begin debate.</p>'}
           <h3>Up next</h3>
           ${pendingItems.length ? `<ul class="list">${pendingItems.map((l) => `<li class="spread"><span>${esc(l.title)}</span><button class="sm" data-act="begin" data-id="${l.id}">Begin debate</button></li>`).join('')}</ul>` : '<p class="muted small">Nothing else pending.</p>'}
         </div>
@@ -372,11 +464,211 @@ function viewChair() {
               <button class="sm" data-act="motion-status" data-id="${x.id}" data-status="passed">Passed (no objection)</button>
               <button class="sm" data-act="motion-status" data-id="${x.id}" data-status="withdrawn">Withdrawn / out of order</button>` : ''}</div></li>`).join('')}</ul>` : ''}
         </div>
-        <div class="card"><h2>Announce</h2><form data-form="announce" class="row"><input name="body" placeholder="e.g. Five-minute recess, return at 10:40" style="flex:1;min-width:180px"><button class="sm">Post</button></form></div>
+        <div class="card"><h2>Announce</h2><form data-form="announce" class="row"><input name="body" placeholder="e.g. Five-minute recess, return at 10:40" style="flex:1;min-width:160px"><button class="sm">Post</button></form></div>
         ${s.past_votes.length ? `<div class="card"><h2>Recent votes</h2><ul class="list">${s.past_votes.map((v) => `<li class="spread"><span>${esc(v.label)}</span><span class="small">${v.tally.yes}–${v.tally.no}–${v.tally.abstain} <span class="pill ${v.result}">${esc(v.result)}</span></span></li>`).join('')}</ul></div>` : ''}
       </div>
     </div>`;
 }
+
+// ---------- Personal tracker (private, saved to the owner's account) ----------
+const uid = () => Math.random().toString(36).slice(2, 10);
+function blankTracker() {
+  return { people: [], speakOrder: [], qOrder: [], speeches: [], questions: [], item: '', currentSpeechId: null, timer: null,
+    speechSecs: 180, authQSecs: 120, qSecs: 60 };
+}
+async function renderTrackerList() {
+  const { trackers } = await api('GET', '/api/trackers');
+  $view.innerHTML = `<a href="#/">← Home</a><h1>My personal trackers</h1>
+    <p class="muted">Use one at any tournament, even one that doesn't use this app. Add the people in your chamber, then track who has spoken, who asked questions, precedence, recency and the timer. Only you can see your trackers.</p>
+    <form class="card row" data-form="new-tracker"><input name="name" placeholder="e.g. State Quals, Senate Chamber 2" style="flex:1;min-width:200px" required><button class="primary">Start a tracker</button></form>
+    <div class="card">${trackers.length ? `<ul class="list">${trackers.map((t) => `<li class="spread"><a href="#/tracker/${t.id}"><strong>${esc(t.name)}</strong></a>
+      <span class="row"><span class="small muted">Updated ${new Date(t.updated_at).toLocaleDateString()}</span><button class="sm ghost" data-act="tr-delete" data-id="${t.id}" data-name="${esc(t.name)}">Delete</button></span></li>`).join('')}</ul>` : '<p class="muted">No trackers yet.</p>'}</div>`;
+}
+async function openTracker(id) {
+  try {
+    const t = await api('GET', `/api/trackers/${id}`);
+    tracker = { id: t.id, name: t.name, data: { ...blankTracker(), ...t.data } };
+    renderTracker();
+  } catch (e) { $view.innerHTML = `<div class="card"><p>${esc(e.message)}</p><a href="#/tracker">Back</a></div>`; }
+}
+let saveTimer = null;
+function saveTracker() {
+  clearTimeout(saveTimer);
+  const t = tracker;
+  saveTimer = setTimeout(() => api('PUT', `/api/trackers/${t.id}`, { name: t.name, data: t.data }).catch((e) => toast(`Not saved: ${e.message}`, true)), 400);
+}
+function trStats() {
+  const d = tracker.data, st = new Map(d.people.map((p) => [p.id, { speeches: 0, questions: 0, lastSpeech: null, lastQuestion: null }]));
+  for (const x of d.speeches) { const r = st.get(x.pid); if (r) { r.speeches++; r.lastSpeech = Math.max(r.lastSpeech || 0, x.at); } }
+  for (const x of d.questions) { const r = st.get(x.pid); if (r) { r.questions++; r.lastQuestion = Math.max(r.lastQuestion || 0, x.at); } }
+  return st;
+}
+function trRuleOrder(kind) {
+  const d = tracker.data, st = trStats(), seat = new Map(d.people.map((p, i) => [p.id, i]));
+  const ck = kind === 'speak' ? 'speeches' : 'questions', lk = kind === 'speak' ? 'lastSpeech' : 'lastQuestion';
+  return d.people.map((p) => p.id).sort((a, b) => (st.get(a)[ck] - st.get(b)[ck]) || ((st.get(a)[lk] ?? -1) - (st.get(b)[lk] ?? -1)) || (seat.get(a) - seat.get(b)));
+}
+function trSync() {
+  // Keep the stored orders consistent with the people list.
+  const d = tracker.data, ids = new Set(d.people.map((p) => p.id));
+  for (const k of ['speakOrder', 'qOrder']) {
+    d[k] = d[k].filter((id) => ids.has(id));
+    for (const id of trRuleOrder(k === 'speakOrder' ? 'speak' : 'question')) if (!d[k].includes(id)) d[k].push(id);
+  }
+}
+function trCurrentSpeech() { const d = tracker.data; return d.currentSpeechId ? d.speeches.find((x) => x.id === d.currentSpeechId) : null; }
+function trNextSide() {
+  const d = tracker.data;
+  if (!d.item) return null;
+  const onItem = d.speeches.filter((x) => x.item === d.item);
+  const last = onItem[onItem.length - 1];
+  return !last ? 'authorship' : (last.side === 'neg' ? 'aff' : 'neg');
+}
+function trSetTimer(label, secs) { tracker.data.timer = { label, duration: secs, started_at: Date.now(), elapsed_ms: 0, running: true }; }
+function renderTracker() {
+  document.body.classList.add('wide');
+  trSync();
+  const d = tracker.data, st = trStats(), sp = trCurrentSpeech();
+  const name = (id) => d.people.find((p) => p.id === id)?.name || '(removed)';
+  const model = {
+    scope: 'tracker', timer: d.timer, title: d.item, nextSide: d.item ? trNextSide() : null,
+    speaker: sp ? { name: name(sp.pid), side: sp.side } : null,
+    qSecs: sp && sp.side === 'authorship' ? d.authQSecs : d.qSecs, canQuestion: !!sp,
+    people: d.people.map((p) => ({ id: p.id, name: p.name, school: p.school, ...st.get(p.id), speaking: sp?.pid === p.id, tags: [] })),
+    order: { speak: d.speakOrder, question: d.qOrder },
+    ruleOrder: { speak: trRuleOrder('speak'), question: trRuleOrder('question') },
+  };
+  const log = [...d.speeches].reverse();
+  const items = [...new Set(d.speeches.map((x) => x.item).filter(Boolean))];
+  $view.innerHTML = `
+    <div class="spread"><div class="row"><a href="#/tracker">← My trackers</a></div><span class="pill">Private to you</span></div>
+    <div class="spread"><h1>${esc(tracker.name)}</h1>
+      <form class="row" data-form="tr-item" style="flex:1;max-width:560px"><input name="item" value="${esc(d.item)}" placeholder="What's on the floor? e.g. A Bill to…" list="tr-items" style="flex:1"><datalist id="tr-items">${items.map((i) => `<option value="${esc(i)}">`).join('')}</datalist><button class="sm">Set item</button></form></div>
+    <div class="dash">
+      <div class="dash-main">${dashList(model)}</div>
+      <div class="dash-side">
+        ${dashTimer(model)}
+        <div class="card"><h2>People in the chamber (${d.people.length})</h2>
+          <form data-form="tr-people" class="stack"><textarea name="text" rows="3" placeholder="One per line: Name, School"></textarea><button class="sm primary">Add</button></form>
+          ${d.people.length ? `<details style="margin-top:8px"><summary class="small">Remove someone</summary><ul class="list">${d.people.map((p) => `<li class="spread">${esc(p.name)} <button class="sm ghost" data-act="tr-remove-person" data-id="${p.id}">Remove</button></li>`).join('')}</ul></details>` : ''}
+        </div>
+        <div class="card"><h2>Log</h2>
+          ${log.length ? `<ul class="list">${log.slice(0, 40).map((x) => {
+            const qs = d.questions.filter((q) => q.speechId === x.id);
+            return `<li><div class="spread"><span><span class="pill ${x.side}">${SIDE_LABEL[x.side]}</span> <strong>${esc(name(x.pid))}</strong></span>
+              <span class="small muted">${fmtTime(x.at)} <button class="sm ghost" data-act="tr-undo-speech" data-id="${x.id}">Remove</button></span></div>
+              ${x.item ? `<div class="small muted">${esc(x.item)}</div>` : ''}
+              ${qs.length ? `<div class="small">Questions: ${qs.map((q) => `${esc(name(q.pid))} <button class="sm ghost" data-act="tr-undo-question" data-id="${q.id}" title="Remove">✕</button>`).join(', ')}</div>` : ''}</li>`;
+          }).join('')}</ul>` : '<p class="muted small">Speeches you log show up here.</p>'}
+        </div>
+        <div class="card"><h2>Timer lengths</h2><form data-form="tr-settings" class="inline-fields">
+          <div class="field"><label>Speech (sec)</label><input name="speechSecs" type="number" value="${d.speechSecs}"></div>
+          <div class="field"><label>Authorship Q (sec)</label><input name="authQSecs" type="number" value="${d.authQSecs}"></div>
+          <div class="field"><label>Other Q (sec)</label><input name="qSecs" type="number" value="${d.qSecs}"></div>
+          <div><button class="sm">Save</button></div></form>
+          <p class="small muted"><button class="sm ghost" data-act="tr-clear">Clear all speeches and questions</button></p>
+        </div>
+      </div>
+    </div>`;
+}
+// Tracker actions mirror the chamber's server actions, but run locally and save privately.
+const trackerOps = {
+  recognize(id, side) {
+    const d = tracker.data;
+    if (!d.item) { toast('Set what is on the floor first.', true); return; }
+    const sp = { id: uid(), pid: id, side, at: Date.now(), item: d.item };
+    d.speeches.push(sp); d.currentSpeechId = sp.id;
+    d.speakOrder = [...d.speakOrder.filter((x) => x !== id), id];
+    trSetTimer('Speech', d.speechSecs);
+  },
+  question(id) {
+    const d = tracker.data;
+    if (!d.currentSpeechId) return;
+    d.questions.push({ id: uid(), pid: id, at: Date.now(), speechId: d.currentSpeechId });
+    d.qOrder = [...d.qOrder.filter((x) => x !== id), id];
+  },
+  questioning() { const d = tracker.data, sp = trCurrentSpeech(); if (sp) trSetTimer('Questioning', sp.side === 'authorship' ? d.authQSecs : d.qSecs); },
+  end() { tracker.data.currentSpeechId = null; tracker.data.timer = null; },
+  timer(a) {
+    const t = tracker.data.timer; if (!t) return;
+    if (a === 'pause' && t.running) { t.elapsed_ms += Date.now() - t.started_at; t.running = false; }
+    else if (a === 'resume' && !t.running) { t.started_at = Date.now(); t.running = true; }
+    else if (a === 'reset') { t.elapsed_ms = 0; t.running = false; }
+  },
+  custom(label, secs) { trSetTimer(label, secs); },
+  queue(kind, a, ids) {
+    const d = tracker.data, key = kind === 'speak' ? 'speakOrder' : 'qOrder';
+    if (a === 'reset') d[key] = trRuleOrder(kind);
+    else if (a === 'shuffle') {
+      const st = trStats(), ck = kind === 'speak' ? 'speeches' : 'questions', lk = kind === 'speak' ? 'lastSpeech' : 'lastQuestion';
+      const r = new Map(d.people.map((p) => [p.id, Math.random()]));
+      d[key] = d.people.map((p) => p.id).sort((a2, b) => (st.get(a2)[ck] - st.get(b)[ck]) || ((st.get(a2)[lk] ?? -1) - (st.get(b)[lk] ?? -1)) || (r.get(a2) - r.get(b)));
+    } else if (a === 'set') d[key] = ids;
+  },
+};
+function trackerDo(fn) { fn(); saveTracker(); renderTracker(); }
+
+// Dispatch dashboard actions to the chamber (server) or the personal tracker (local).
+async function dashAction(scope, op, ...args) {
+  if (scope === 'tracker') return trackerDo(() => trackerOps[op](...args));
+  const [a, b, c2] = args;
+  switch (op) {
+    case 'recognize': return act('POST', C('/recognize'), { user_id: a, side: b }, `Recognized ${competitor(a)?.display_name}`);
+    case 'question': return act('POST', C('/questions'), { user_id: a });
+    case 'questioning': return act('POST', C('/questioning'));
+    case 'end': return act('POST', C('/speech/end'));
+    case 'timer': return act('POST', C('/timer'), { action: a });
+    case 'custom': return act('POST', C('/timer'), { action: 'custom', label: a, seconds: b });
+    case 'queue': return act('POST', C('/queue'), { kind: a, action: b, ids: c2 });
+  }
+}
+function dashOrder() {
+  if (tracker) return [...(ui.dashList === 'speak' ? tracker.data.speakOrder : tracker.data.qOrder)];
+  return [...(ui.dashList === 'speak' ? state.speaking_precedence : state.question_precedence)];
+}
+function dashScope() { return tracker ? 'tracker' : 'chamber'; }
+
+// Drag and drop rows on the dashboard list.
+let dragId = null;
+document.addEventListener('dragstart', (e) => {
+  const tr = e.target.closest?.('tr[data-drag-id]');
+  if (!tr) return;
+  dragId = tr.dataset.dragId;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', dragId);
+  tr.classList.add('dragging');
+});
+document.addEventListener('dragover', (e) => {
+  const tr = e.target.closest?.('tr[data-drag-id]');
+  if (!tr || dragId == null) return;
+  e.preventDefault();
+  document.querySelectorAll('.drop-above,.drop-below').forEach((x) => x.classList.remove('drop-above', 'drop-below'));
+  const r = tr.getBoundingClientRect();
+  tr.classList.add(e.clientY < r.top + r.height / 2 ? 'drop-above' : 'drop-below');
+});
+document.addEventListener('dragend', () => { dragId = null; document.querySelectorAll('.dragging,.drop-above,.drop-below').forEach((x) => x.classList.remove('dragging', 'drop-above', 'drop-below')); });
+document.addEventListener('drop', (e) => {
+  const tr = e.target.closest?.('tr[data-drag-id]');
+  if (!tr || dragId == null) return;
+  e.preventDefault();
+  const scope = dashScope(), parse = (v) => (scope === 'tracker' ? v : Number(v));
+  const moving = parse(dragId), target = parse(tr.dataset.dragId);
+  const below = tr.classList.contains('drop-below');
+  dragId = null;
+  if (moving === target) return;
+  const ids = dashOrder().filter((x) => x !== moving);
+  ids.splice(ids.indexOf(target) + (below ? 1 : 0), 0, moving);
+  dashAction(scope, 'queue', ui.dashList, 'set', ids);
+});
+// Space bar starts/pauses the timer on a dashboard.
+document.addEventListener('keydown', (e) => {
+  if (e.code !== 'Space' || isTyping() || e.target.closest?.('button,a,summary')) return;
+  const onDash = tracker || (state && currentTab() === 'chair' && state.me.canChair);
+  const t = activeTimer().t;
+  if (!onDash || !t) return;
+  e.preventDefault();
+  dashAction(dashScope(), 'timer', t.running ? 'pause' : 'resume');
+});
 
 // ---------- Judge scoring ----------
 function scoreButtons(current, attrs) {
@@ -493,6 +785,7 @@ function viewSetup() {
       <div class="field"><label>Presiding officer (after the chamber elects one)</label><select name="po_user_id"><option value="">None yet</option>
         ${s.competitors.map((p) => `<option value="${p.id}" ${p.id === c.po_user_id ? 'selected' : ''}>${esc(p.display_name)}</option>`).join('')}</select></div>
       <button class="primary">Save settings</button>
+      <p class="small" style="margin-bottom:0"><button type="button" class="sm" data-act="delete-chamber">${s.is_mock ? 'Delete this mock tournament' : 'Delete chamber'}</button></p>
     </form>
     <div class="card"><h2>Members</h2>
       <h3>Competitors (${s.competitors.length})</h3>
@@ -539,7 +832,22 @@ document.addEventListener('submit', async (e) => {
       case 'add-members': { const ids = [...f.querySelectorAll('input[name=u]:checked')].map((x) => Number(x.value)); if (!ids.length) return; f.querySelector('button').focus(); await act('POST', C('/members'), { user_ids: ids }, 'Added'); break; }
       case 'new-leg': f.querySelector('button').focus(); if (await act('POST', C('/legislation'), d, 'Added to docket')) f.reset(); break;
       case 'edit-leg': f.querySelector('button').focus(); await act('PUT', C(`/legislation/${f.dataset.id}`), d, 'Saved'); break;
-      case 'custom-timer': f.querySelector('button').focus(); await act('POST', C('/timer'), { action: 'custom', label: d.label || 'Timer', seconds: Number(d.seconds) }); break;
+      case 'd-custom-timer': {
+        const secs = Math.round(Number(d.minutes) * 60);
+        if (!secs) { toast('Enter the number of minutes.', true); return; }
+        f.querySelector('button').focus();
+        await dashAction(f.dataset.scope, 'custom', d.label || 'Timer', secs);
+        break;
+      }
+      case 'new-tracker': { const r = await api('POST', '/api/trackers', d); go(`#/tracker/${r.id}`); break; }
+      case 'tr-item': f.querySelector('button').focus(); trackerDo(() => { tracker.data.item = d.item.trim(); }); break;
+      case 'tr-people': {
+        const lines = d.text.split('\n').map((l) => l.trim()).filter(Boolean);
+        f.querySelector('button').focus();
+        trackerDo(() => { for (const l of lines) { const [n, sc = ''] = l.split(',').map((x) => x.trim()); if (n) tracker.data.people.push({ id: uid(), name: n, school: sc }); } });
+        break;
+      }
+      case 'tr-settings': f.querySelector('button').focus(); trackerDo(() => { for (const k of ['speechSecs', 'authQSecs', 'qSecs']) { const v = Number(d[k]); if (v > 0) tracker.data[k] = Math.round(v); } }); toast('Saved'); break;
       case 'motion': f.querySelector('button').focus(); await act('POST', C('/motions'), d, 'Motion on the floor'); break;
       case 'announce': f.querySelector('button').focus(); if (await act('POST', C('/announcements'), d, 'Posted')) f.reset(); break;
       case 'hand-vote': f.querySelector('button').focus(); await act('POST', C(`/legislation/${f.dataset.id}/result`), { status: d.status, yes: d.yes === '' ? null : Number(d.yes), no: d.no === '' ? null : Number(d.no), abstain: d.abstain === '' ? null : Number(d.abstain) }, 'Result recorded'); break;
@@ -550,6 +858,13 @@ document.addEventListener('submit', async (e) => {
 // Judge comments save when the field loses focus.
 document.addEventListener('change', async (e) => {
   const el = e.target;
+  if (el.matches('[data-viewas]')) {
+    ui.viewAs = el.value ? Number(el.value) : null;
+    ui.rankDraft = null; ui.results = null;
+    el.blur();
+    await loadState();
+    return;
+  }
   if (el.dataset.commentFor) {
     const id = Number(el.dataset.commentFor), sc = state.my_scores[id];
     if (!sc) { toast('Pick points first, then your comment is saved with them.', true); return; }
@@ -576,17 +891,47 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'ballot': await act('POST', C('/ballot'), { choice: d.choice }, 'Vote recorded'); break;
-    case 'pick-side': ui.recognizeSide = d.side; render(); break;
-    case 'recognize': {
-      const side = ui.recognizeSide || s.chamber.next_side || 'aff';
-      ui.recognizeSide = null;
-      await act('POST', C('/recognize'), { user_id: Number(d.id), side }, `Recognized ${competitor(Number(d.id)).display_name}`);
+    case 'd-recognize': await dashAction(d.scope, 'recognize', d.scope === 'tracker' ? d.id : Number(d.id), d.side); break;
+    case 'd-question': await dashAction(d.scope, 'question', d.scope === 'tracker' ? d.id : Number(d.id)); break;
+    case 'd-questioning': await dashAction(d.scope, 'questioning'); break;
+    case 'd-end': await dashAction(d.scope, 'end'); break;
+    case 'd-timer': await dashAction(d.scope, 'timer', d.a); break;
+    case 'd-list': ui.dashList = d.kind; render(); break;
+    case 'd-queue': await dashAction(d.scope, 'queue', ui.dashList, d.a); break;
+    case 'd-move': {
+      const id = d.scope === 'tracker' ? d.id : Number(d.id), ids = dashOrder(), i = ids.indexOf(id), j = i + Number(d.dir);
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+      await dashAction(d.scope, 'queue', ui.dashList, 'set', ids);
       break;
     }
-    case 'timer': await act('POST', C('/timer'), { action: d.a }); break;
-    case 'questioning': await act('POST', C('/questioning')); break;
-    case 'end-speech': await act('POST', C('/speech/end')); break;
-    case 'question': await act('POST', C('/questions'), { user_id: Number(d.id) }); break;
+    case 'tr-remove-person': if (confirm('Remove this person and their speeches from the tracker?')) trackerDo(() => {
+      const t = tracker.data; t.people = t.people.filter((x) => x.id !== d.id);
+      t.speeches = t.speeches.filter((x) => x.pid !== d.id); t.questions = t.questions.filter((x) => x.pid !== d.id);
+      if (t.currentSpeechId && !t.speeches.some((x) => x.id === t.currentSpeechId)) { t.currentSpeechId = null; t.timer = null; }
+    }); break;
+    case 'tr-undo-speech': if (confirm('Remove this speech from your log?')) trackerDo(() => {
+      const t = tracker.data; t.speeches = t.speeches.filter((x) => x.id !== d.id); t.questions = t.questions.filter((x) => x.speechId !== d.id);
+      if (t.currentSpeechId === d.id) { t.currentSpeechId = null; t.timer = null; }
+      t.speakOrder = trRuleOrder('speak'); t.qOrder = trRuleOrder('question');
+    }); break;
+    case 'tr-undo-question': trackerDo(() => { const t = tracker.data; t.questions = t.questions.filter((x) => x.id !== d.id); t.qOrder = trRuleOrder('question'); }); break;
+    case 'tr-clear': if (confirm('Clear every speech and question? People stay.')) trackerDo(() => {
+      Object.assign(tracker.data, { speeches: [], questions: [], currentSpeechId: null, timer: null, speakOrder: [], qOrder: [] });
+    }); break;
+    case 'tr-delete': if (confirm(`Delete the tracker "${d.name}"?`)) { await api('DELETE', `/api/trackers/${d.id}`); renderTrackerList(); } break;
+    case 'make-mock': {
+      try {
+        b.disabled = true;
+        const r = await api('POST', '/api/mock', {});
+        toast(`Mock tournament ready. Its made-up people all use the password "${r.password}".`);
+        go(`#/c/${r.id}/chair`);
+      } catch (err) { toast(err.message, true); b.disabled = false; }
+      break;
+    }
+    case 'delete-chamber': if (confirm(s.is_mock ? 'Delete this mock tournament and all of its made-up people?' : 'Delete this chamber and every speech, vote and score in it? This cannot be undone.')) {
+      ui.viewAs = null;
+      try { await api('DELETE', C('')); toast('Deleted'); go('#/'); } catch (err) { toast(err.message, true); }
+    } break;
     case 'del-question': await act('DELETE', C(`/questions/${d.id}`)); break;
     case 'del-speech': if (confirm('Remove this speech from the record? Use this only to fix a mistake.')) await act('DELETE', C(`/speeches/${d.id}`)); break;
     case 'status': await act('POST', C('/status'), { status: d.status }); break;
