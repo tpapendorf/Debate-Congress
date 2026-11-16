@@ -123,3 +123,14 @@ tr.me td { background: color-mix(in srgb, var(--accent) 12%, transparent); font-
 .code { font-family: ui-monospace, monospace; font-size: 24px; font-weight: 800; letter-spacing: 3px; background: var(--bg); padding: 4px 10px; border-radius: 6px; }
 .strike { text-decoration: line-through; }
 .whoami a { margin-right: 4px; }
+
+/* citations and linked docs */
+.cite-fields { display: flex; flex-direction: column; gap: 6px; }
+.cite-url { flex-wrap: nowrap; }
+.cite-url input { flex: 1; min-width: 0; }
+.linkish { background: none; border: 0; padding: 0; min-height: 0; color: var(--accent, #2457c5); font: inherit; text-decoration: underline; cursor: pointer; }
+.link-row { display: flex; gap: 8px; align-items: center; text-decoration: none; color: var(--ink); min-width: 0; }
+.link-row strong { word-break: break-word; }
+.link-icon { font-size: 18px; flex: none; }
+.works-cited { padding-left: 20px; margin: 0; font-size: 14px; }
+.works-cited li { margin-bottom: 6px; word-break: break-word; }

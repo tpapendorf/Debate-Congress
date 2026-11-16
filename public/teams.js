@@ -11,14 +11,46 @@ const PLAN_SIDES = { authorship: 'Authorship', aff: 'Affirmative', neg: 'Negativ
 const T = (path = '') => `/api/teams/${teamCtx.id}${path}`;
 const fmtDate = (ms) => new Date(ms).toLocaleDateString([], { month: 'short', day: 'numeric' });
 
+// Short form for spoken use: Author, "Title," Publication (Date)
+function citeBits(i) {
+  const parts = [i.cite_author, i.cite_title ? `"${i.cite_title}"` : '', i.cite_source].filter(Boolean).join(', ');
+  return [parts, i.cite_date ? `(${i.cite_date})` : ''].filter(Boolean).join(' ');
+}
 function citation(i) {
-  const bits = [i.cite_author, i.cite_source, i.cite_date ? `(${i.cite_date})` : ''].filter(Boolean).join(', ').replace(', (', ' (');
+  const bits = citeBits(i);
   if (!bits && !i.cite_url) return '';
-  return `<div class="cite">${esc(bits)}${i.cite_url ? ` <a href="${esc(i.cite_url)}" target="_blank" rel="noopener noreferrer">source ↗</a>` : ''}</div>`;
+  return `<div class="cite">${esc(bits)}${i.cite_url ? ` <a href="${esc(i.cite_url)}" target="_blank" rel="noopener noreferrer">${esc(linkHost(i.cite_url))} ↗</a>` : ''}</div>`;
 }
 function citationText(i) {
-  const bits = [i.cite_author, i.cite_source, i.cite_date ? `(${i.cite_date})` : ''].filter(Boolean).join(', ').replace(', (', ' (');
-  return [bits, i.cite_url].filter(Boolean).join(' ');
+  return [citeBits(i), i.cite_url].filter(Boolean).join(' ');
+}
+// Full form for a works-cited list: Author. "Title." Publication, Date. URL
+function citationFull(i) {
+  const end = (t) => (/[.?!]$/.test(t) ? t : `${t}.`);
+  return [i.cite_author && end(i.cite_author), i.cite_title && `"${end(i.cite_title)}"`, [i.cite_source, i.cite_date].filter(Boolean).join(', ') && end([i.cite_source, i.cite_date].filter(Boolean).join(', ')), i.cite_url].filter(Boolean).join(' ');
+}
+function linkHost(url) { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return 'source'; } }
+
+// ---------- linked docs and folders ----------
+const LINK_KIND = { gdoc: ['Google Doc', '📄'], gsheet: ['Google Sheet', '📊'], gslides: ['Google Slides', '📽'], gform: ['Google Form', '📝'], gfolder: ['Drive folder', '📁'], gdrive: ['Google Drive file', '📎'], web: ['Link', '🔗'] };
+function linksCard(links, { title = 'Linked docs & folders', billId, planId, hint, canAdd = true } = {}) {
+  const myId = teamCtx.data.me.id, leader = teamCtx.data.me.isLeader;
+  return `<div class="card links-card"><h2>${title}</h2>
+    ${hint ? `<p class="small muted">${hint}</p>` : ''}
+    ${links.length ? `<ul class="list">${links.map((l) => {
+      const [label, icon] = LINK_KIND[l.kind] || LINK_KIND.web;
+      const canDel = l.plan_id ? l.created_by === myId : (l.created_by === myId || leader);
+      return `<li class="spread"><a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer" class="link-row"><span class="link-icon" aria-hidden="true">${icon}</span><span><strong>${esc(l.title)}</strong><span class="small muted"> ${esc([l.title === label ? '' : label, l.plan_id ? '' : l.added_by].filter(Boolean).join(' · '))}</span></span></a>
+        ${canDel ? `<button class="sm ghost" data-tact="delete-link" data-id="${l.id}" aria-label="Remove link">✕</button>` : ''}</li>`;
+    }).join('')}</ul>` : '<p class="muted small">Nothing linked yet.</p>'}
+    ${canAdd ? `<details><summary class="small"><strong>+ Add a link</strong></summary>
+      <form class="stack" data-tform="new-link" ${billId ? `data-bill="${billId}"` : ''} ${planId ? `data-plan="${planId}"` : ''} style="margin-top:8px">
+        <input name="url" required placeholder="Paste a Google Doc, Drive folder or web link">
+        <input name="title" placeholder="Name (optional)">
+        <button class="sm primary">Add link</button>
+        <p class="small muted" style="margin:0">Google files open with each person's own Google sharing. Set the doc or folder to "Anyone with the link" or share it with your team.</p>
+      </form></details>` : ''}
+  </div>`;
 }
 
 // ---------- sign up with a join code ----------
@@ -93,7 +125,7 @@ const reTeam = () => route();
 
 // ---------- research ----------
 async function viewResearch() {
-  const { bills } = teamCtx.data;
+  const { bills, links } = teamCtx.data;
   return `
     <div class="grid side">
       <div class="card"><h2>Bills and resolutions (${bills.length})</h2>
@@ -109,6 +141,7 @@ async function viewResearch() {
           <div class="field"><label>Source</label><input name="source" placeholder="e.g. State Quals docket"></div></div>
           <div class="field"><label>Summary</label><textarea name="summary" rows="3"></textarea></div>
           <button class="primary">Add</button></form>
+        ${linksCard(links || [], { title: 'Team docs & folders', hint: 'The team Drive folder, a shared docket doc, a research spreadsheet…' })}
         <div class="card"><h2>Import from a docket</h2><p class="small muted">Copies bills from chambers you're in, so the team can research them.</p>
           <div data-docket-options><button class="sm" data-tact="load-docket">Show docket items</button></div></div>
       </div>
@@ -121,8 +154,12 @@ function itemForm(section, item = {}, billId) {
     <textarea name="detail" rows="2" placeholder="${isEv ? 'How to use it (optional)' : section === 'question' ? 'Suggested answer (optional)' : 'Warrant and impact (optional)'}">${esc(item.detail || '')}</textarea>
     ${isEv ? `<div class="inline-fields"><select name="side">${['both', 'aff', 'neg'].map((s) => `<option value="${s}" ${item.side === s ? 'selected' : ''}>${s === 'both' ? 'Either side' : s === 'aff' ? 'Supports aff' : 'Supports neg'}</option>`).join('')}</select></div>` : ''}
     <details ${isEv ? 'open' : ''}><summary class="small">Citation</summary>
-      <div class="inline-fields" style="margin-top:6px"><input name="cite_author" placeholder="Author / organization" value="${esc(item.cite_author || '')}"><input name="cite_source" placeholder="Publication or title" value="${esc(item.cite_source || '')}">
-      <input name="cite_date" placeholder="Date" value="${esc(item.cite_date || '')}"><input name="cite_url" placeholder="Link" value="${esc(item.cite_url || '')}"></div></details>
+      <div class="cite-fields" style="margin-top:6px">
+        <div class="row cite-url"><input name="cite_url" placeholder="Paste the article link" value="${esc(item.cite_url || '')}"><button type="button" class="sm" data-tact="autofill">Fill in from link</button></div>
+        <div class="inline-fields"><input name="cite_author" placeholder="Author / organization" value="${esc(item.cite_author || '')}"><input name="cite_title" placeholder="Article title" value="${esc(item.cite_title || '')}"></div>
+        <div class="inline-fields"><input name="cite_source" placeholder="Publication / website" value="${esc(item.cite_source || '')}"><input name="cite_date" placeholder="Date" value="${esc(item.cite_date || '')}"></div>
+        <div class="small muted" data-cite-msg></div>
+      </div></details>
     <div class="row"><button class="sm primary">${item.id ? 'Save' : 'Add'}</button>${item.id ? `<button type="button" class="sm ghost" data-tact="delete-item" data-bill="${billId}" data-id="${item.id}">Delete</button>` : ''}</div>
   </form>`;
 }
@@ -130,11 +167,11 @@ function itemView(i, billId) {
   return `<li class="item"><div class="spread"><div>${i.section === 'evidence' && i.side !== 'both' ? `<span class="pill ${i.side}">${i.side}</span> ` : ''}<strong>${esc(i.text)}</strong></div></div>
     ${i.detail ? `<div class="small">${esc(i.detail)}</div>` : ''}
     ${citation(i)}
-    <div class="small muted">${esc(i.updated_by_name || i.created_by_name || '')} · ${fmtDate(i.updated_at)}</div>
+    <div class="small muted">${esc(i.updated_by_name || i.created_by_name || '')} · ${fmtDate(i.updated_at)}${citationFull(i) ? ` · <button class="linkish" data-tact="copy-cite" data-text="${esc(citationFull(i))}">Copy citation</button>` : ''}</div>
     <details><summary class="small">Edit</summary>${itemForm(i.section, i, billId)}</details></li>`;
 }
 async function viewBill(bid) {
-  const { bill, items, my_plans, my_notes } = await api('GET', T(`/bills/${bid}`));
+  const { bill, items, my_plans, my_notes, links } = await api('GET', T(`/bills/${bid}`));
   const evSide = ui.evSide || 'all';
   const section = (k) => {
     let list = items.filter((i) => i.section === k);
@@ -160,7 +197,7 @@ async function viewBill(bid) {
     </div>
     <div class="grid two">
       <div>${section('aff')}${section('evidence')}</div>
-      <div>${section('neg')}${section('question')}</div>
+      <div>${section('neg')}${section('question')}${linksCard(links, { title: 'Docs & folders for this bill', billId: bill.id, hint: 'Shared research docs, Drive folders or articles. Everyone on the team sees these.' })}</div>
     </div>`;
 }
 
@@ -191,7 +228,11 @@ async function viewPrep() {
     </div>`;
 }
 async function viewPlan(pid) {
-  const { plan, own, author, items } = await api('GET', T(`/plans/${pid}`));
+  const { plan, own, author, items, links } = await api('GET', T(`/plans/${pid}`));
+  const used = items.filter((i) => citationFull(i) && plan.outline.includes(i.text));
+  const cited = `<div class="card"><div class="spread"><h2>Works cited</h2>${used.length ? `<button class="sm" data-tact="copy-cite" data-text="${esc(used.map(citationFull).join('\n'))}">Copy all</button>` : ''}</div>
+    ${used.length ? `<ol class="works-cited">${used.map((i) => `<li>${esc(citationFull(i))}${i.cite_url ? ` <a href="${esc(i.cite_url)}" target="_blank" rel="noopener noreferrer">↗</a>` : ''}</li>`).join('')}</ol>`
+      : '<p class="muted small">Insert team evidence into your outline and its sources are listed here automatically.</p>'}</div>`;
   const bills = teamCtx.data.bills;
   const relevant = items.filter((i) => i.section === 'question' || i.section === 'evidence' ? (i.side === 'both' || plan.side === 'authorship' || i.side === plan.side) : (plan.side === 'authorship' ? i.section === 'aff' : i.section === plan.side || i.section === (plan.side === 'aff' ? 'neg' : 'aff')));
   const groups = [['aff', 'neg'].includes(plan.side) ? plan.side : 'aff', 'evidence', 'question', plan.side === 'aff' ? 'neg' : plan.side === 'neg' ? 'aff' : null].filter(Boolean);
@@ -217,7 +258,8 @@ async function viewPlan(pid) {
           : relevant.length ? groups.map((g) => { const list = relevant.filter((i) => i.section === g); return list.length ? `<h3>${SECTION_LABEL[g]}</h3><ul class="list">${list.map((i) => `<li><div class="spread"><strong class="small">${esc(i.text)}</strong>${own ? `<button class="sm" data-tact="insert" data-text="${esc(i.text + (i.detail ? ` (${i.detail})` : '') + (citationText(i) ? ` [${citationText(i)}]` : ''))}">Insert</button>` : ''}</div>${citation(i)}</li>`).join('')}</ul>` : ''; }).join('')
           : `<p class="muted small">No research yet. <a href="#/team/${teamCtx.id}/bill/${plan.bill_id}">Add some on the bill page</a>.</p>`}
       </div>
-    </div>`;
+    </div>
+    <div class="grid two">${cited}${linksCard(links, { title: 'My docs for this speech', planId: plan.id, canAdd: own, hint: own ? 'Link your Google Doc draft or anything else for this speech. Only you see these, plus coaches and captains if you share the plan.' : '' })}</div>`;
 }
 async function viewNote(nid) {
   const { notes } = await api('GET', T('/prep'));
@@ -332,6 +374,7 @@ document.addEventListener('submit', async (e) => {
       case 'save-note': await api('PUT', T(`/notes/${f.dataset.id}`), d); toast('Saved'); break;
       case 'new-entry': await api('POST', T('/progress'), d); toast('Logged'); reTeam(); break;
       case 'new-goal': await api('POST', T('/goals'), { ...d, user_id: Number(f.dataset.user) }); toast('Goal added'); reTeam(); break;
+      case 'new-link': await api('POST', T('/links'), { ...d, bill_id: f.dataset.bill ? Number(f.dataset.bill) : undefined, plan_id: f.dataset.plan ? Number(f.dataset.plan) : undefined }); toast('Link added'); reTeam(); break;
       case 'team-settings': await api('PUT', T(''), d); toast('Saved'); reTeam(); break;
       case 'import': {
         const ids = [...f.querySelectorAll('input[name=leg]:checked')].map((x) => Number(x.value));
@@ -363,6 +406,22 @@ document.addEventListener('click', async (e) => {
         break;
       }
       case 'ev-side': ui.evSide = d.side; reTeam(); break;
+      case 'autofill': {
+        const f = b.closest('form'), msg = f.querySelector('[data-cite-msg]'), url = f.cite_url.value.trim();
+        if (!url) { msg.textContent = 'Paste a link first.'; f.cite_url.focus(); break; }
+        b.disabled = true; msg.textContent = 'Reading the page…';
+        try {
+          const r = await api('GET', T(`/cite?url=${encodeURIComponent(url)}`));
+          f.cite_url.value = r.url || url;
+          for (const k of ['author', 'title', 'source', 'date']) if (r[k] && !f[`cite_${k}`].value.trim()) f[`cite_${k}`].value = r[k];
+          const got = ['author', 'title', 'source', 'date'].filter((k) => r[k]);
+          msg.textContent = r.note || (got.length ? `Filled in ${got.join(', ')}. Check it, then save.` : 'That page has no citation details. Fill them in by hand.');
+        } catch (err) { msg.textContent = err.message; }
+        finally { b.disabled = false; }
+        break;
+      }
+      case 'copy-cite': try { await navigator.clipboard.writeText(d.text); toast('Citation copied'); } catch { toast('Could not copy. Select the text instead.', true); } break;
+      case 'delete-link': if (confirm('Remove this link? The doc itself is not touched.')) { await api('DELETE', T(`/links/${d.id}`)); reTeam(); } break;
       case 'delete-item': if (confirm('Delete this for the whole team?')) { await api('DELETE', T(`/bills/${d.bill}/items/${d.id}`)); reTeam(); } break;
       case 'delete-bill': if (confirm('Delete this bill and all of its research for the whole team?')) { await api('DELETE', T(`/bills/${d.id}`)); go(`#/team/${teamCtx.id}/research`); } break;
       case 'plan-from-bill': { const r = await api('POST', T('/plans'), { title: `${PLAN_SIDES[d.side]}: ${d.title}`.slice(0, 200), bill_id: Number(d.bill), side: d.side }); go(`#/team/${teamCtx.id}/plan/${r.id}`); break; }
