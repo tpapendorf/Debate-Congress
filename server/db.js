@@ -150,6 +150,30 @@ function open(file = DB_PATH) {
       updated_at INTEGER NOT NULL
     );
   `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS judge_ballots (
+      chamber_id INTEGER NOT NULL REFERENCES chambers(id) ON DELETE CASCADE,
+      judge_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      submitted_at INTEGER,
+      publish TEXT NOT NULL DEFAULT 'private' CHECK (publish IN ('private','individual','all')),
+      PRIMARY KEY (chamber_id, judge_id)
+    );
+    CREATE TABLE IF NOT EXISTS practice_scores (
+      speech_id INTEGER NOT NULL REFERENCES speeches(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      points INTEGER NOT NULL,
+      comment TEXT NOT NULL DEFAULT '',
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (speech_id, user_id)
+    );
+    CREATE TABLE IF NOT EXISTS practice_rankings (
+      chamber_id INTEGER NOT NULL REFERENCES chambers(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      ranked_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      rank INTEGER NOT NULL,
+      PRIMARY KEY (chamber_id, user_id, ranked_user_id)
+    );
+  `);
   migrate(db);
   return db;
 }
@@ -162,6 +186,7 @@ function migrate(db) {
   add('chamber_members', 'question_pos', 'REAL');   // questioning precedence queue
   add('chambers', 'is_mock', 'INTEGER NOT NULL DEFAULT 0');
   add('users', 'mock_chamber_id', 'INTEGER');       // set for made-up people in a mock tournament
+  add('chambers', 'standings_publish', "TEXT NOT NULL DEFAULT 'private'"); // private | individual | all
 }
 
 module.exports = { open, DB_PATH };
