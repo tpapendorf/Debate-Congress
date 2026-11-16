@@ -168,6 +168,14 @@ function open(file = DB_PATH) {
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (speech_id, user_id)
     );
+    CREATE TABLE IF NOT EXISTS question_scores (
+      question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+      scorer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      points INTEGER NOT NULL,
+      comment TEXT NOT NULL DEFAULT '',
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (question_id, scorer_id)
+    );
     CREATE TABLE IF NOT EXISTS practice_rankings (
       chamber_id INTEGER NOT NULL REFERENCES chambers(id) ON DELETE CASCADE,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -189,6 +197,7 @@ function migrate(db) {
   add('chambers', 'is_mock', 'INTEGER NOT NULL DEFAULT 0');
   add('users', 'mock_chamber_id', 'INTEGER');       // set for made-up people in a mock tournament
   add('chambers', 'standings_publish', "TEXT NOT NULL DEFAULT 'private'"); // private | individual | all
+  add('questions', 'logged_by', 'INTEGER REFERENCES users(id) ON DELETE CASCADE'); // set for questions someone logged for themselves
   add('chambers', 'floor_mode', "TEXT NOT NULL DEFAULT 'po'");      // po | self (each judge/competitor logs speeches)
   // Speeches a judge or competitor logs for themselves: logged_by is set, and the bill is optional.
   const speechCols = db.prepare('PRAGMA table_info(speeches)').all();

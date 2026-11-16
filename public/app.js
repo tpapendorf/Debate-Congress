@@ -55,7 +55,7 @@ async function route() {
     try { me = (await api('GET', '/api/me')).user; } catch { me = null; }
   }
   renderWho();
-  document.body.classList.remove('wide');
+  document.body.classList.remove('wide', 'in-chamber');
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   if (parts[0] === 'signup' && !me) return renderSignup(parts[1] || '');
   if (!me) {
@@ -81,11 +81,16 @@ async function route() {
   if (parts[0] === 'account') return renderAccount();
   return renderHome();
 }
-function currentTab() { return location.hash.split('/')[3] || 'floor'; }
+function currentTab() { const t = location.hash.split('/')[3] || ''; return TAB_ALIAS[t] || t; }
 
 function renderWho() {
+  const nav = document.getElementById('mainnav');
+  const here = location.hash.replace(/^#\/?/, '').split('/')[0];
+  const sec = ['c', ''].includes(here) ? 'home' : (['team', 'teams', 'signup'].includes(here) ? 'teams' : here);
+  const links = me ? [['home', '#/', 'Chambers'], ['teams', '#/teams', 'Teams'], ['tracker', '#/tracker', 'Tracker'], ...(me.role === 'admin' ? [['users', '#/users', 'People']] : [])] : [];
+  if (nav) nav.innerHTML = links.map(([k, h, l]) => `<a href="${h}" class="${sec === k ? 'active' : ''}">${l}</a>`).join('');
   $who.innerHTML = me
-    ? `<a href="#/teams">Teams</a><span>${esc(me.display_name)} · ${esc(me.role)}</span><a href="#/account">Account</a><button class="ghost sm" data-act="logout">Sign out</button>`
+    ? `<a href="#/account" class="me-chip" title="Account and password"><span class="avatar">${esc((me.display_name || '?').trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase())}</span><span class="me-name">${esc(me.display_name)}<small>${esc(me.role)}</small></span></a><button class="ghost sm" data-act="logout">Sign out</button>`
     : '';
 }
 
@@ -188,21 +193,19 @@ async function renderHome() {
   const { chambers } = await api('GET', '/api/chambers');
   const admin = me.role === 'admin';
   $view.innerHTML = `
-    <h1>Chambers</h1>
-    ${admin ? `<div class="card"><form class="row" data-form="new-chamber">
-        <input name="name" placeholder="New chamber name, e.g. House Prelims Chamber A" required style="flex:1;min-width:200px">
-        <button class="primary">Create chamber</button></form>
-        <div class="spread" style="margin-top:10px"><a class="small" href="#/users">Manage people and logins →</a>
-        <button class="sm" data-act="make-mock">Create a mock tournament for testing</button></div></div>` : ''}
-    <div class="card">
-      ${chambers.length ? `<ul class="list">${chambers.map((c) => `
-        <li class="spread"><a href="#/c/${c.id}/floor"><strong>${esc(c.name)}</strong></a>
-        <span class="row">${c.is_mock ? '<span class="pill debating">Mock</span>' : ''}${c.is_po ? '<span class="pill">You preside</span>' : ''}<span class="pill">${esc(STATUS_LABEL[c.status])}</span></span></li>`).join('')}</ul>`
-        : `<p class="muted">${admin ? 'No chambers yet. Create one above.' : 'You are not assigned to a chamber yet. Ask your tournament admin.'}</p>`}
-    </div>
-    <div class="card spread"><div><h2 style="margin:0">Personal tracker</h2>
-      <p class="small muted" style="margin:4px 0 0">Track precedence, recency and a timer on your own, for any chamber. Only you can see it.</p></div>
-      <a class="btn" href="#/tracker">Open my trackers</a></div>`;
+    <div class="page-head"><div><span class="eyebrow">Welcome, ${esc(me.display_name.split(' ')[0])}</span><h1>Your chambers</h1></div>
+      ${admin ? '<div class="row"><a class="btn" href="#/users">People and logins</a><button data-act="make-mock">Mock tournament</button></div>' : ''}</div>
+    ${chambers.length ? `<div class="tiles">${chambers.map((c) => `
+      <a class="tile status-${c.status}" href="#/c/${c.id}">
+        <span class="tile-top"><span class="pill status-${c.status}">${esc(STATUS_LABEL[c.status])}</span>${c.is_mock ? '<span class="pill debating">Mock</span>' : ''}${c.is_po ? '<span class="pill">You preside</span>' : ''}</span>
+        <strong>${esc(c.name)}</strong><span class="tile-go">Open →</span></a>`).join('')}</div>`
+      : `<div class="card empty"><p class="muted">${admin ? 'No chambers yet. Create one below, or make a mock tournament to try things out.' : 'You are not assigned to a chamber yet. Ask your tournament admin.'}</p></div>`}
+    ${admin ? `<form class="card row" data-form="new-chamber"><input name="name" placeholder="New chamber name, e.g. House Prelims Chamber A" required style="flex:1;min-width:200px">
+        <button class="primary">Create chamber</button></form>` : ''}
+    <div class="grid two">
+      <a class="card link-card" href="#/teams"><span class="eyebrow">Prep</span><h2>Teams</h2><p class="small muted">Shared bill research, speech plans, notes and progress.</p></a>
+      <a class="card link-card" href="#/tracker"><span class="eyebrow">On your own</span><h2>Personal tracker</h2><p class="small muted">Track precedence, recency and a timer for any chamber. Only you see it.</p></a>
+    </div>`;
 }
 
 // ---------- users (admin) ----------
@@ -246,22 +249,36 @@ async function renderUsers() {
 }
 
 // ---------- chamber shell ----------
+// A few tabs per role. Old tab names in saved links still land somewhere sensible.
+const TAB_LABEL = { live: 'Dashboard', ballot: 'Ballot', floor: 'Floor', practice: 'Practice', reflect: 'My results', docket: 'Docket', setup: 'Setup', results: 'Results' };
+const TAB_ALIAS = { chair: 'live', score: 'live', log: 'docket' };
+const TAB_ICON = {
+  live: '<path d="M12 7v5l3 2"/><circle cx="12" cy="12" r="8"/>',
+  ballot: '<path d="M9 11l2 2 4-4"/><rect x="4" y="3" width="16" height="18" rx="2"/>',
+  floor: '<path d="M3 21h18M5 21V10l7-5 7 5v11M9 21v-6h6v6"/>',
+  practice: '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>',
+  reflect: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  docket: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  setup: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/>',
+  results: '<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 01-10 0zM17 5h3v2a3 3 0 01-3 3M7 5H4v2a3 3 0 003 3"/>',
+};
+const icon = (k) => `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TAB_ICON[k] || ''}</svg>`;
 function tabsFor(m) {
-  const t = [['floor', 'Floor']];
-  if (m.canChair && state?.chamber?.floor_mode !== 'self') t.push(['chair', 'Dashboard']);
-  if (m.isJudge) t.push(['score', 'Score']);
-  if (m.isCompetitor) t.push(['practice', 'Practice ballot'], ['reflect', 'Reflection']);
-  t.push(['docket', 'Docket'], ['log', 'Speech log']);
-  if (m.isAdmin) t.push(['setup', 'Setup'], ['results', 'Results']);
-  return t;
+  const self = state?.chamber?.floor_mode === 'self';
+  if (m.isJudge) return ['live', 'ballot', 'docket'];
+  if (m.isPO && !self) return ['live', 'floor', 'docket'];
+  if (m.isCompetitor) return self ? ['practice', 'reflect', 'docket'] : ['floor', 'practice', 'reflect', 'docket'];
+  if (m.isAdmin) return self ? ['docket', 'setup', 'results'] : ['live', 'docket', 'setup', 'results'];
+  return ['floor', 'docket'];
 }
 function renderChamber() {
   const s = state, c = s.chamber, m = s.me;
   const tabs = tabsFor(m);
-  let tab = currentTab();
-  if (!tabs.some(([k]) => k === tab)) tab = 'floor';
-  const body = { floor: viewFloor, chair: viewChair, score: () => viewBallot('judge'), practice: () => viewBallot('practice'), reflect: viewReflection, docket: viewDocket, log: viewLog, setup: viewSetup, results: viewResults }[tab]();
-  document.body.classList.toggle('wide', tab === 'chair');
+  let tab = TAB_ALIAS[currentTab()] || currentTab();
+  if (!tabs.includes(tab)) tab = tabs[0];
+  const body = { live: () => viewLive(m.isJudge ? 'judge' : 'chair'), ballot: () => viewBallot('judge'), floor: viewFloor, practice: () => viewLive('practice'), reflect: viewReflection, docket: viewDocket, setup: viewSetup, results: viewResults }[tab]();
+  document.body.classList.toggle('wide', ['live', 'practice'].includes(tab));
+  document.body.classList.add('in-chamber');
   const viewAs = s.view_as_options ? `<div class="card viewas row">
       <strong>Mock tournament.</strong> <label for="viewas" style="margin:0">View as</label>
       <select id="viewas" data-viewas style="width:auto;flex:1;min-width:200px"><option value="">Myself (admin)</option>
@@ -269,9 +286,11 @@ function renderChamber() {
       ${m.viewingAs ? '<span class="small">Everything you do now counts as this person, so you can vote, rise and score as them.</span>' : ''}</div>` : '';
   $view.innerHTML = `
     ${viewAs}
-    <div class="spread"><h1>${esc(c.name)}</h1><span class="row">${s.is_mock ? '<span class="pill debating">Mock</span>' : ''}<span class="pill">${esc(STATUS_LABEL[c.status])}</span>
-      ${c.po_name ? `<span class="pill">PO: ${esc(c.po_name)}</span>` : ''}</span></div>
-    <nav class="tabs">${tabs.map(([k, label]) => `<a href="#/c/${c.id}/${k}" class="${k === tab ? 'active' : ''}">${label}</a>`).join('')}</nav>
+    <div class="page-head"><div><a href="#/" class="eyebrow back">← All chambers</a><h1>${esc(c.name)}</h1></div>
+      <div class="row head-pills">${s.is_mock ? '<span class="pill debating">Mock</span>' : ''}<span class="pill status-${c.status}">${esc(STATUS_LABEL[c.status])}</span>
+      ${c.floor_mode === 'self' ? '<span class="pill">Self-tracked</span>' : (c.po_name ? `<span class="pill">PO: ${esc(c.po_name)}</span>` : '')}
+      <span class="pill role">${m.isJudge ? 'Judge' : m.isPO ? 'Presiding officer' : m.isCompetitor ? 'Competitor' : 'Admin'}</span></div></div>
+    <nav class="tabs chamber-tabs">${tabs.map((k) => `<a href="#/c/${c.id}/${k}" class="${k === tab ? 'active' : ''}">${icon(k)}<span>${TAB_LABEL[k]}</span></a>`).join('')}</nav>
     ${body}`;
 }
 const currentLeg = () => state.chamber.current_legislation_id && byId(state.legislation, state.chamber.current_legislation_id);
@@ -317,8 +336,8 @@ function viewFloor() {
   const canRise = m.isCompetitor && !m.isPO && c.current_legislation_id;
   if (c.floor_mode === 'self') return `<div class="card"><h2>No PO in the app for this chamber</h2>
     <p>Each person tracks the floor for themselves, and nobody else sees your log.</p>
-    <ul>${m.isJudge ? '<li>Judges: open <a href="#/c/' + c.id + '/score">Score</a>, tap a name when someone gets the floor, then score the speech right there.</li>' : ''}
-      ${m.isCompetitor ? '<li>Competitors: open <a href="#/c/' + c.id + '/practice">Practice ballot</a> to log speeches, run a timer and practice scoring.</li>' : ''}
+    <ul>${m.isJudge ? '<li>Judges: open the <a href="#/c/' + c.id + '/live">Dashboard</a>, tap Speech beside a name when someone gets the floor, then score it right there.</li>' : ''}
+      ${m.isCompetitor ? '<li>Competitors: open <a href="#/c/' + c.id + '/practice">Practice</a> to log speeches, run a timer and practice scoring.</li>' : ''}
       ${m.isAdmin ? '<li>Admins can switch this back to a PO-run chamber in Setup.</li>' : ''}</ul></div>`;
   return viewFloorPO();
 }
@@ -437,24 +456,12 @@ function chamberDashModel() {
   };
 }
 
-function viewChair() {
-  const s = state, c = s.chamber, leg = currentLeg(), sp = currentSpeech();
+function chairControls() {
+  const s = state, c = s.chamber, leg = currentLeg();
   const pendingItems = s.legislation.filter((l) => ['pending', 'debating'].includes(l.status) && l.id !== c.current_legislation_id);
-  const qs = sp ? s.questions.filter((q) => q.speech_id === sp.id) : [];
   const motionsOpen = s.motions.filter((x) => ['pending', 'voting'].includes(x.status));
   const competitorsOpts = s.competitors.filter((p) => !p.is_po).map((p) => `<option value="${p.id}">${esc(p.display_name)}</option>`).join('');
-  const model = chamberDashModel();
   return `
-    ${voteBanner()}
-    ${s.open_vote ? `<div class="card row"><button class="primary" data-act="close-vote" data-id="${s.open_vote.id}">Close vote and announce result</button>
-       <button data-act="cancel-vote" data-id="${s.open_vote.id}">Cancel vote</button></div>` : ''}
-    <div class="dash">
-      <div class="dash-main">
-        ${dashList(model)}
-      </div>
-      <div class="dash-side">
-        ${dashTimer(model)}
-        ${sp && qs.length ? `<div class="card"><h2>Questions for ${esc(sp.speaker_name)}</h2><ul class="list">${qs.map((q) => `<li class="spread">${esc(q.questioner_name)} <button class="sm ghost" data-act="del-question" data-id="${q.id}">Undo</button></li>`).join('')}</ul></div>` : ''}
         <div class="card"><h2>Session</h2><div class="row">
           ${c.status !== 'in_session' ? '<button class="primary" data-act="status" data-status="in_session">Call to order</button>' : '<button data-act="status" data-status="recess">Recess</button>'}
           ${c.status !== 'adjourned' ? '<button data-act="status" data-status="adjourned">Adjourn</button>' : ''}
@@ -486,7 +493,188 @@ function viewChair() {
         </div>
         <div class="card"><h2>Announce</h2><form data-form="announce" class="row"><input name="body" placeholder="e.g. Five-minute recess, return at 10:40" style="flex:1;min-width:160px"><button class="sm">Post</button></form></div>
         ${s.past_votes.length ? `<div class="card"><h2>Recent votes</h2><ul class="list">${s.past_votes.map((v) => `<li class="spread"><span>${esc(v.label)}</span><span class="small">${v.tally.yes}–${v.tally.no}–${v.tally.abstain} <span class="pill ${v.result}">${esc(v.result)}</span></span></li>`).join('')}</ul></div>` : ''}
+        <details class="card"><summary><strong>Other timer</strong> <span class="small muted">recess, caucus…</span></summary>
+          <form class="row" data-form="d-custom-timer" data-scope="chamber" style="margin-top:8px">
+            <input name="label" placeholder="Label, e.g. Recess" style="width:auto;flex:2;min-width:120px"><input name="minutes" type="number" min="0.25" step="0.25" placeholder="Minutes" style="width:auto;flex:1;min-width:80px">
+            <button class="sm">Set</button></form></details>`;
+}
+
+// ---------- Live dashboard (judges, the PO, admins, and competitors' practice) ----------
+// One screen for the round: timer and who has the floor, score and note the speech and its questions in place,
+// the roster in precedence order with Speech and Question buttons, and a feed of everything so far.
+function liveCtx(mode) {
+  const s = state, c = s.chamber, m = s.me, self = c.floor_mode === 'self';
+  const speeches = allSpeeches();
+  const questions = [...s.questions, ...(s.my_questions || [])].sort((a, b) => a.asked_at - b.asked_at);
+  const curId = self ? myTimer()?.speech_id : c.current_speech_id;
+  const cur = speeches.find((x) => x.id === curId) || null;
+  const locked = !!(m.isJudge && s.my_ballot?.submitted_at);
+  const canMark = self ? (m.isJudge || m.isCompetitor) && !locked : m.canChair;
+  const scoreMode = mode === 'practice' ? 'practice' : (mode === 'judge' && m.isJudge ? 'judge' : null);
+  const cfg = scoreMode ? ballotCfg(scoreMode) : null;
+  return { mode, s, c, m, self, speeches, questions, cur, canMark, cfg, locked, timer: self ? myTimer() : c.timer };
+}
+const canScoreSpeech = (x, sp) => x.cfg && !(x.cfg.mode === 'practice' && sp.speaker_id === x.m.id);
+const canScoreQuestion = (x, q) => x.cfg && q.questioner_id !== x.m.id;
+function noteValue(kind, id, saved) { return saved ?? ui.notes?.[`${kind}${id}`] ?? ''; }
+
+function liveSide(x) {
+  if (ui.markSide) return ui.markSide;
+  return x.self ? trackGuessSide() : (x.c.next_side || 'authorship');
+}
+function liveNow(x) {
+  const { c, s, self, cur, canMark, timer: t } = x;
+  const leg = currentLeg();
+  const qSecs = cur && ['authorship', 'sponsorship'].includes(cur.side) ? c.authorship_question_seconds : c.question_seconds;
+  const bill = self ? trackBill() : null;
+  const billHtml = self
+    ? `<div class="now-bill-pick"><select data-track="bill" aria-label="Bill" ${canMark ? '' : 'disabled'}>${s.legislation.map((l) => `<option value="${l.id}" ${bill === String(l.id) ? 'selected' : ''}>${esc(l.title)}</option>`).join('')}<option value="other" ${bill === 'other' ? 'selected' : ''}>${s.legislation.length ? 'Another bill…' : 'Type the bill name'}</option></select>
+       ${bill === 'other' ? `<input data-track="topic" value="${esc(trackTopic())}" placeholder="Bill name" aria-label="Bill name">` : ''}</div>`
+    : `<div class="now-bill">${leg ? esc(leg.title) : 'No item on the floor'}</div>`;
+  const ctl = (act, label, cls = '', extra = '') => `<button class="${cls}" data-act="${act}" ${self ? '' : 'data-scope="chamber"'} ${extra}>${label}</button>`;
+  const controls = !canMark ? '' : `<div class="now-controls">
+      ${t ? ctl(self ? 'track-timer' : 'd-timer', t.running ? 'Pause' : 'Start', t.running ? '' : 'primary', `data-a="${t.running ? 'pause' : 'resume'}" title="Space bar"`) : ''}
+      ${cur && t?.label === 'Speech' ? ctl(self ? 'track-questioning' : 'd-questioning', `Questioning · ${fmtSecs(qSecs)}`) : ''}
+      ${cur ? ctl(self ? 'track-end' : 'd-end', 'End speech') : (t ? (self ? ctl('track-end', 'Clear timer') : ctl('d-timer', 'Reset', '', 'data-a="reset"')) : '')}
+    </div>`;
+  return `<div class="now-card ${cur ? cur.side : ''}">
+    <div class="now-head"><span class="eyebrow">${self ? 'Bill' : (leg ? `Now debating · ${esc(leg.kind)}` : 'Floor')}</span>${billHtml}</div>
+    <div class="now-body">
+      <div class="now-who">
+        ${cur ? `<span class="pill ${cur.side}">${SIDE_LABEL[cur.side]}</span><div class="now-name">${esc(cur.speaker_name)}</div>` : `<div class="now-name dim">Floor is open</div>`}
+        <div class="small now-sub">${t ? `${esc(t.label)}${t.running ? '' : ' · paused'}` : (canMark ? 'Tap <b>Speech</b> beside a name to start' : 'Waiting for the next speaker')}</div>
       </div>
+      <div class="now-timer">${timerHtml(t)}</div>
+    </div>
+    ${controls}
+  </div>`;
+}
+function liveScoreSpeech(x, sp) {
+  const cfg = x.cfg, sc = cfg.scores[sp.id], note = noteValue('s', sp.id, sc?.comment);
+  return `<div class="score-block">
+    <div class="spread"><h3>Score ${esc(sp.speaker_name)}'s speech</h3>${sc ? `<span class="pill saved">${sc.points} pts</span>` : '<span class="pill warn">Not scored</span>'}</div>
+    ${scoreButtons(sc?.points, `data-act="score" data-mode="${cfg.mode}" data-id="${sp.id}"`, cfg.locked)}
+    <div class="chips">${CHIPS.map((ch) => `<button class="chip ${note.includes(ch) ? 'on' : ''}" data-act="chip" data-mode="${cfg.mode}" data-id="${sp.id}" data-chip="${ch}" ${cfg.locked ? 'disabled' : ''}>${ch}</button>`).join('')}</div>
+    <textarea data-comment-for="${sp.id}" data-mode="${cfg.mode}" placeholder="${cfg.mode === 'judge' ? 'Note for this speech (the competitor sees it only if you publish your ballot)' : 'Your note (only you see it)'}" ${cfg.locked ? 'disabled' : ''}>${esc(note)}</textarea>
+  </div>`;
+}
+function liveQuestion(x, q, compact) {
+  const sc = x.s.my_question_scores?.[q.id], scorable = canScoreQuestion(x, q);
+  const note = noteValue('q', q.id, sc?.comment);
+  const undo = x.canMark ? (q.logged_by ? `<button class="sm ghost" data-act="myq-delete" data-id="${q.id}" title="Remove">✕</button>` : (x.m.canChair ? `<button class="sm ghost" data-act="del-question" data-id="${q.id}" title="Remove">✕</button>` : '')) : '';
+  const opts = (cur) => `<option value="">pts</option>${Array.from({ length: x.c.score_max - x.c.score_min + 1 }, (_, i) => x.c.score_min + i).map((p) => `<option ${cur === p ? 'selected' : ''}>${p}</option>`).join('')}`;
+  return `<div class="q-row">
+    <div class="q-line"><span class="q-tag">Q</span><strong>${esc(q.questioner_name)}</strong><span class="small muted">${fmtTime(q.asked_at)}</span>
+      <span class="q-actions">${scorable ? (compact
+        ? `<select class="pts" data-grid-question="${q.id}" ${x.cfg.locked ? 'disabled' : ''} aria-label="Points for ${esc(q.questioner_name)}'s question">${opts(sc?.points)}</select>`
+        : scoreButtons(sc?.points, `data-act="qscore" data-id="${q.id}"`, x.cfg.locked).replace('score-buttons', 'score-buttons mini')) : ''}${undo}</span></div>
+    ${scorable ? `<details class="note" ${note && !compact ? 'open' : ''}><summary class="small">${note ? `Note: ${esc(note.length > 60 ? note.slice(0, 60) + '…' : note)}` : 'Add a note'}</summary>
+      <textarea data-qcomment-for="${q.id}" placeholder="Note on this question" ${x.cfg.locked ? 'disabled' : ''}>${esc(note)}</textarea></details>` : ''}
+  </div>`;
+}
+function liveCurrentPanel(x) {
+  const { cur } = x;
+  if (!cur) return '';
+  const qs = x.questions.filter((q) => q.speech_id === cur.id);
+  const scoreSp = canScoreSpeech(x, cur);
+  if (!scoreSp && !qs.length && !x.canMark) return '';
+  return `<div class="card live-panel">
+    ${scoreSp ? liveScoreSpeech(x, cur) : ''}
+    <div class="q-block"><div class="spread"><h3>Questions ${qs.length ? `<span class="muted">${qs.length}</span>` : ''}</h3>
+      ${x.canMark ? '<span class="small muted">Tap <b>Q</b> beside a name to log a questioner</span>' : ''}</div>
+      ${qs.length ? qs.map((q) => liveQuestion(x, q, false)).join('') : '<p class="small muted" style="margin:0">No questions yet.</p>'}</div>
+  </div>`;
+}
+function liveFeed(x) {
+  const list = [...x.speeches].reverse().filter((sp) => sp !== x.cur);
+  const opts = (cur) => `<option value="">pts</option>${Array.from({ length: x.c.score_max - x.c.score_min + 1 }, (_, i) => x.c.score_min + i).map((p) => `<option ${cur === p ? 'selected' : ''}>${p}</option>`).join('')}`;
+  const unscored = x.cfg ? list.filter((sp) => canScoreSpeech(x, sp) && !x.cfg.scores[sp.id]).length : 0;
+  return `<div class="card feed"><div class="spread"><h2>This round</h2>${unscored ? `<span class="pill warn">${unscored} to score</span>` : ''}</div>
+    ${list.length ? list.map((sp) => {
+      const sc = x.cfg?.scores[sp.id], qs = x.questions.filter((q) => q.speech_id === sp.id), note = noteValue('s', sp.id, sc?.comment);
+      const scorable = canScoreSpeech(x, sp);
+      return `<div class="feed-item ${scorable && !sc ? 'unscored' : ''}">
+        <div class="feed-line"><span class="pill ${sp.side}">${SIDE_LABEL[sp.side].slice(0, sp.side === 'authorship' ? 4 : 3)}</span>
+          <div class="feed-main"><strong>${esc(sp.speaker_name)}</strong><div class="small muted">${esc(sp.legislation_title)} · ${fmtTime(sp.recognized_at)}${sp.duration_seconds != null ? ` · ${fmtSecs(sp.duration_seconds)}` : ''}</div></div>
+          ${scorable ? `<select class="pts" data-grid-speech="${sp.id}" data-mode="${x.cfg.mode}" ${x.cfg.locked ? 'disabled' : ''} aria-label="Points for ${esc(sp.speaker_name)}">${opts(sc?.points)}</select>` : ''}
+          ${!sp.mine && x.m.canChair && !x.self ? `<button class="sm ghost" data-act="del-speech" data-id="${sp.id}" title="Remove from the record">✕</button>` : ''}</div>
+        ${scorable ? `<details class="note"><summary class="small">${note ? `Note: ${esc(note.length > 70 ? note.slice(0, 70) + '…' : note)}` : 'Add a note'}</summary>
+          <div class="chips">${CHIPS.map((ch) => `<button class="chip ${note.includes(ch) ? 'on' : ''}" data-act="chip" data-mode="${x.cfg.mode}" data-id="${sp.id}" data-chip="${ch}" ${x.cfg.locked ? 'disabled' : ''}>${ch}</button>`).join('')}</div>
+          <textarea data-comment-for="${sp.id}" data-mode="${x.cfg.mode}" ${x.cfg.locked ? 'disabled' : ''}>${esc(note)}</textarea></details>` : ''}
+        ${qs.length ? `<div class="feed-qs">${qs.map((q) => liveQuestion(x, q, true)).join('')}</div>` : ''}
+        ${sp.mine && !x.locked ? logFixer(sp) : ''}
+      </div>`;
+    }).join('') : `<p class="muted">${x.cur ? 'Earlier speeches show up here.' : 'Nothing yet. Speeches and questions show up here as they happen.'}</p>`}
+  </div>`;
+}
+// Questioning precedence from this person's own log.
+function myQPrecedence() {
+  const stats = new Map(state.competitors.map((p) => [p.id, { n: 0, last: -1 }]));
+  for (const q of state.my_questions || []) { const st = stats.get(q.questioner_id); if (st) { st.n += 1; st.last = q.asked_at; } }
+  return state.competitors.filter((p) => !p.is_po).map((p) => ({ p, ...stats.get(p.id) }))
+    .sort((a, b) => (a.n - b.n) || (a.last - b.last) || ((a.p.seat ?? 0) - (b.p.seat ?? 0)));
+}
+function liveRoster(x) {
+  const { s, self, cur, canMark } = x;
+  const kind = ui.dashList === 'question' ? 'question' : 'speak';
+  const chairQueue = !self && x.m.canChair;
+  let order;
+  const counts = new Map();
+  if (self) {
+    const sp = myPrecedence(), qp = myQPrecedence();
+    for (const r of sp) counts.set(r.p.id, { s: r.n, q: 0 });
+    for (const r of qp) counts.get(r.p.id).q = r.n;
+    order = (kind === 'speak' ? sp : qp).map((r) => r.p.id);
+  } else {
+    for (const p of s.competitors) counts.set(p.id, { s: p.speeches, q: p.questions });
+    order = kind === 'speak' ? s.speaking_precedence : s.question_precedence;
+  }
+  const side = liveSide(x);
+  const canSpeech = canMark && (self || x.c.current_legislation_id);
+  const rule = kind === 'speak' ? s.speaking_rule_order : s.question_rule_order;
+  const adjusted = chairQueue && JSON.stringify(order) !== JSON.stringify(rule);
+  const standing = (id) => s.requests.filter((r) => r.user_id === id).map((r) => r.kind);
+  return `<div class="card roster">
+    <div class="spread"><h2>Chamber</h2>
+      <div class="seg small-seg"><button class="${kind === 'speak' ? 'on' : ''}" data-act="d-list" data-kind="speak">Speaking order</button><button class="${kind === 'question' ? 'on' : ''}" data-act="d-list" data-kind="question">Questioning order</button></div></div>
+    ${canMark ? `<div class="side-pick"><span class="small muted">Next speech</span><div class="seg">${['authorship', 'aff', 'neg'].map((k) => `<button class="${side === k ? 'on ' + k : ''}" data-act="mark-side" data-side="${k}">${k === 'authorship' ? 'Authorship' : k === 'aff' ? 'Aff' : 'Neg'}</button>`).join('')}</div></div>` : ''}
+    ${!self && canMark && !x.c.current_legislation_id ? '<p class="small warn-text">Begin debate on a docket item (below) before recognizing speakers.</p>' : ''}
+    <div class="roster-list">${order.map((id, i) => {
+      const p = competitor(id); if (!p) return '';
+      const n = counts.get(id) || { s: 0, q: 0 }, speaking = cur?.speaker_id === id, st = self ? [] : standing(id);
+      return `<div class="roster-row ${speaking ? 'speaking' : ''}" ${chairQueue ? `draggable="true" data-drag-id="${id}"` : ''}>
+        <span class="n">${i + 1}</span>
+        <span class="who"><strong>${esc(p.display_name)}</strong>${p.school ? `<span class="small muted"> ${esc(p.school)}</span>` : ''}
+          ${speaking ? '<span class="pill now-pill">speaking</span>' : ''}${st.map((k) => `<span class="pill ${k === 'question' ? '' : k}">${k === 'question' ? 'wants Q' : 'rose ' + k}</span>`).join('')}</span>
+        <span class="counts" title="${n.s} speeches, ${n.q} questions">${n.s}<small>sp</small> ${n.q}<small>q</small></span>
+        ${canMark ? `<span class="acts"><button class="sm mark-speech ${side}" data-act="mark-speech" data-id="${id}" ${canSpeech && !speaking ? '' : 'disabled'} title="${SIDE_LABEL[side]} speech">Speech</button><button class="sm mark-q" data-act="mark-question" data-id="${id}" ${cur && !speaking ? '' : 'disabled'} title="${cur ? 'Asked a question' : 'No speech to question yet'}">Q</button></span>` : ''}
+      </div>`;
+    }).join('') || '<p class="muted">No competitors yet.</p>'}</div>
+    ${chairQueue ? `<div class="row roster-foot">${adjusted ? '<span class="small warn-text">Adjusted by hand</span>' : '<span class="small muted">Drag names to adjust</span>'}
+      <button class="sm" data-act="d-queue" data-scope="chamber" data-a="reset" ${adjusted ? '' : 'disabled'}>Reset to rule</button>
+      <button class="sm" data-act="d-queue" data-scope="chamber" data-a="shuffle">Random draw</button></div>` : ''}
+  </div>`;
+}
+function viewLive(mode) {
+  const x = liveCtx(mode), s = x.s;
+  const chair = !x.self && x.m.canChair;
+  return `
+    ${voteBanner()}
+    ${chair && s.open_vote ? `<div class="card row"><button class="primary" data-act="close-vote" data-id="${s.open_vote.id}">Close vote and announce result</button>
+       <button data-act="cancel-vote" data-id="${s.open_vote.id}">Cancel vote</button></div>` : ''}
+    ${x.locked ? `<div class="banner submitted">Ballot submitted. Ask an admin to reopen it to change anything.</div>` : ''}
+    ${x.self && mode !== 'chair' ? '<p class="small muted mode-note">No PO in the app for this chamber, so you track the floor yourself. Your log is private to you.</p>' : ''}
+    <div class="live">
+      <div class="live-main">
+        ${liveNow(x)}
+        ${liveCurrentPanel(x)}
+        ${liveFeed(x)}
+        ${mode === 'practice' ? rankingCard(x.cfg) : ''}
+      </div>
+      <aside class="live-side">
+        ${liveRoster(x)}
+        ${chair ? chairControls() : ''}
+      </aside>
     </div>`;
 }
 
@@ -651,7 +839,7 @@ function dashScope() { return tracker ? 'tracker' : 'chamber'; }
 // Drag and drop rows on the dashboard list.
 let dragId = null;
 document.addEventListener('dragstart', (e) => {
-  const tr = e.target.closest?.('tr[data-drag-id]');
+  const tr = e.target.closest?.('[data-drag-id]');
   if (!tr) return;
   dragId = tr.dataset.dragId;
   e.dataTransfer.effectAllowed = 'move';
@@ -659,7 +847,7 @@ document.addEventListener('dragstart', (e) => {
   tr.classList.add('dragging');
 });
 document.addEventListener('dragover', (e) => {
-  const tr = e.target.closest?.('tr[data-drag-id]');
+  const tr = e.target.closest?.('[data-drag-id]');
   if (!tr || dragId == null) return;
   e.preventDefault();
   document.querySelectorAll('.drop-above,.drop-below').forEach((x) => x.classList.remove('drop-above', 'drop-below'));
@@ -668,7 +856,7 @@ document.addEventListener('dragover', (e) => {
 });
 document.addEventListener('dragend', () => { dragId = null; document.querySelectorAll('.dragging,.drop-above,.drop-below').forEach((x) => x.classList.remove('dragging', 'drop-above', 'drop-below')); });
 document.addEventListener('drop', (e) => {
-  const tr = e.target.closest?.('tr[data-drag-id]');
+  const tr = e.target.closest?.('[data-drag-id]');
   if (!tr || dragId == null) return;
   e.preventDefault();
   const scope = dashScope(), parse = (v) => (scope === 'tracker' ? v : Number(v));
@@ -684,7 +872,7 @@ document.addEventListener('drop', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.code !== 'Space' || isTyping() || e.target.closest?.('button,a,summary')) return;
   const self = selfTracking();
-  const onDash = tracker || self || (state && currentTab() === 'chair' && state.me.canChair);
+  const onDash = tracker || self || (state && ['live', ''].includes(currentTab()) && state.me.canChair);
   const t = activeTimer().t;
   if (!onDash || !t) return;
   e.preventDefault();
@@ -701,7 +889,7 @@ function scoreButtons(current, attrs) {
 // ---------- tracking the floor yourself (no PO in the app) ----------
 // Each judge or competitor keeps a private speech log; the timer runs on this device.
 function selfTracking() {
-  return !!(state && !tracker && state.chamber.floor_mode === 'self' && ['score', 'practice'].includes(currentTab()));
+  return !!(state && !tracker && state.chamber.floor_mode === 'self' && ['live', 'practice', ''].includes(currentTab()));
 }
 function allSpeeches() {
   return [...state.speeches, ...(state.my_log || [])].sort((a, b) => a.recognized_at - b.recognized_at);
@@ -752,36 +940,6 @@ function myPrecedence() {
     .map((p) => ({ p, ...stats.get(p.id) }))
     .sort((a, b) => (a.n - b.n) || (a.last - b.last) || ((a.p.seat ?? 0) - (b.p.seat ?? 0)));
 }
-function trackBar(cfg) {
-  const s = state, c = s.chamber, t = myTimer();
-  const side = ui.trackSide || trackGuessSide(), bill = trackBill();
-  const cur = t?.speech_id && (s.my_log || []).find((x) => x.id === t.speech_id);
-  const qSecs = cur && ['authorship', 'sponsorship'].includes(cur.side) ? c.authorship_question_seconds : c.question_seconds;
-  const dis = cfg.locked ? 'disabled' : '';
-  return `<div class="card trackbar">
-    <div class="spread"><h2 style="margin:0">Track the floor</h2><span class="small muted">No PO in the app here. Your log is private to you.</span></div>
-    <div class="track-grid">
-      <div class="stack">
-        <div class="inline-fields">
-          <div class="field"><label>Bill</label><select data-track="bill" ${dis}>${s.legislation.map((l) => `<option value="${l.id}" ${bill === String(l.id) ? 'selected' : ''}>${esc(l.title)}</option>`).join('')}<option value="other" ${bill === 'other' ? 'selected' : ''}>${s.legislation.length ? 'Something else…' : 'Type the bill name'}</option></select></div>
-          ${bill === 'other' ? `<div class="field"><label>Bill name</label><input data-track="topic" value="${esc(trackTopic())}" placeholder="e.g. A Bill to Reform Bail" ${dis}></div>` : ''}
-        </div>
-        <div class="field"><label>Next speech</label><div class="seg">${['authorship', 'aff', 'neg'].map((k) => `<button class="${side === k ? 'on' : ''}" data-act="track-side" data-side="${k}" ${dis}>${SIDE_LABEL[k]}</button>`).join('')}</div></div>
-        <div class="field"><label>Tap who gets the floor <span class="muted">(next up by precedence first)</span></label>
-          <div class="name-buttons">${myPrecedence().map(({ p, n }, i) => `<button class="${i === 0 ? 'primary' : ''}" data-act="track-speaker" data-id="${p.id}" ${dis}>${esc(p.display_name)}${n ? ` <span class="count">${n}</span>` : ''}</button>`).join('')}</div></div>
-      </div>
-      <div class="track-timer">
-        <div class="muted small">${cur ? `${esc(cur.speaker_name)} · ${SIDE_LABEL[cur.side]}` : 'Timer'}${t ? ` · ${esc(t.label)}${t.running ? '' : ' (paused)'}` : ''}</div>
-        ${timerHtml(t)}
-        <div class="row" style="justify-content:center">
-          ${t ? `<button class="${t.running ? '' : 'primary'}" data-act="track-timer" data-a="${t.running ? 'pause' : 'resume'}" title="Space bar">${t.running ? 'Pause' : 'Start'}</button>` : ''}
-          ${cur && t?.label === 'Speech' ? `<button data-act="track-questioning">Questioning ${fmtSecs(qSecs)}</button>` : ''}
-          ${t ? `<button data-act="track-end">${cur ? 'End speech' : 'Clear'}</button>` : ''}
-        </div>
-      </div>
-    </div>
-  </div>`;
-}
 function logFixer(x) {
   const s = state;
   return `<details class="log-fix"><summary class="small muted">Fix this entry</summary>
@@ -792,6 +950,15 @@ function logFixer(x) {
     </div>
     <button class="sm ghost" data-act="mylog-delete" data-id="${x.id}" style="margin-top:6px">Remove from my log</button></details>`;
 }
+
+async function trackSpeaker(id) {
+  const bill = trackBill();
+  const body = { speaker_id: id, side: ui.trackSide || trackGuessSide(), ...(bill === 'other' ? { topic: trackTopic() } : { legislation_id: Number(bill) }) };
+  await closeMySpeechTime();
+  const r = await act('POST', C('/my-log'), body);
+  if (r) { ui.trackSide = null; ui.markSide = null; startMyTimer('Speech', state.chamber.speech_seconds, r.speech_id); ui.trackBill = bill; await loadState(); }
+}
+document.addEventListener('track-speaker', (e) => trackSpeaker(e.detail));
 
 // A ballot is the judge's real scoring sheet, or a competitor's practice sheet (same screen, never counted).
 const CHIPS = ['Clash', 'Evidence', 'Refutation', 'Delivery', 'Questioning', 'Organization', 'Time'];
@@ -822,7 +989,7 @@ function scoreButtons(current, attrs, disabled) {
 }
 function speechCard(cfg, x, now) {
   const sc = cfg.scores[x.id], c = state.chamber;
-  const comment = sc?.comment || '';
+  const comment = noteValue('s', x.id, sc?.comment);
   return `<div class="card ${sc ? '' : 'unscored'} ${now ? 'now' : ''}" style="margin-bottom:10px">
     <div class="spread"><div>${now ? '<span class="pill debating">Speaking now</span> ' : ''}<strong>${esc(x.speaker_name)}</strong> <span class="pill ${x.side}">${SIDE_LABEL[x.side]}</span></div>
     <span class="small muted">${fmtTime(x.recognized_at)}${x.duration_seconds != null ? ` · ${fmtSecs(x.duration_seconds)}` : ''}</span></div>
@@ -886,7 +1053,6 @@ function viewBallot(mode) {
       ? `Points ${c.score_min}–${c.score_max}. Your scores stay private unless you or an admin publish them.`
       : `Score speeches the way a judge would, then compare after results are published. This never counts, and only you can see it.`}</p>
       <div class="seg"><button class="${view === 'list' ? 'on' : ''}" data-act="ballot-view" data-v="list">List</button><button class="${view === 'grid' ? 'on' : ''}" data-act="ballot-view" data-v="grid">Grid</button></div></div>
-    ${c.floor_mode === 'self' ? trackBar(cfg) : ''}
     ${mode === 'judge' && b.submitted_at ? `<div class="banner submitted">Ballot submitted at ${fmtTime(b.submitted_at)}. Ask an admin to reopen it if you need to change something.</div>` : ''}
     <div class="grid side" style="margin-top:12px">
       <div>
@@ -989,7 +1155,8 @@ function viewDocket() {
       <div class="inline-fields"><div class="field"><label>Type</label><select name="kind"><option value="bill">Bill</option><option value="resolution">Resolution</option></select></div>
       <div class="field"><label>Author / school</label><input name="author"></div></div>
       <div class="field"><label>Text</label><textarea name="body" rows="6" placeholder="Paste the full text so everyone can read it on their device"></textarea></div>
-      <button class="primary">Add to docket</button></form>` : ''}`;
+      <button class="primary">Add to docket</button></form>` : ''}
+    ${s.speeches.length ? `<h2 class="section-title">Speech record</h2>${viewLog()}` : ''}`;
 }
 
 // ---------- Speech log ----------
@@ -1052,9 +1219,9 @@ function viewResults() {
   const r = ui.results;
   if (!r) { api('GET', C('/results')).then((x) => { ui.results = x; render(); }).catch((e) => toast(e.message, true)); return '<p class="muted">Loading…</p>'; }
   return `<div class="card"><div class="spread"><h2>Standings</h2><a class="btn" href="${C('/results.csv')}">Download CSV</a></div>
-    <p class="small muted">Ordered by the sum of judge ranks (lower is better; an unranked competitor counts as ${r.unranked_value}), then total points. Totals include PO points. ${r.total_speeches} speeches so far.</p>
-    <div class="table-wrap"><table><tr><th>#</th><th>Competitor</th><th>Speeches</th><th>Points</th><th>Avg</th><th>Rank sum</th>${r.judges.map((j) => `<th>${esc(j.display_name)}</th>`).join('')}</tr>
-    ${r.rows.map((x) => `<tr><td>${x.place}</td><td>${esc(x.name)}${x.was_po ? ' <span class="pill">PO</span>' : ''}<div class="small muted">${esc(x.school)}</div></td><td>${x.speeches}</td><td>${x.total_points}</td><td>${x.average_points ?? '—'}</td><td>${x.rank_total}</td>
+    <p class="small muted">Ordered by the sum of judge ranks (lower is better; an unranked competitor counts as ${r.unranked_value}), then total points. Totals include PO points. Q pts are judges' question scores, shown separately and not added in. ${r.total_speeches} speeches so far.</p>
+    <div class="table-wrap"><table><tr><th>#</th><th>Competitor</th><th>Speeches</th><th>Points</th><th>Avg</th><th>Rank sum</th><th title="Judges' question scores, shown separately and not added to points">Q pts</th>${r.judges.map((j) => `<th>${esc(j.display_name)}</th>`).join('')}</tr>
+    ${r.rows.map((x) => `<tr><td>${x.place}</td><td>${esc(x.name)}${x.was_po ? ' <span class="pill">PO</span>' : ''}<div class="small muted">${esc(x.school)}</div></td><td>${x.speeches}</td><td>${x.total_points}</td><td>${x.average_points ?? '—'}</td><td>${x.rank_total}</td><td>${x.questions_scored ? `${x.question_points}<div class="small muted">${x.questions_scored} scored</div>` : '—'}</td>
       ${x.by_judge.map((b) => `<td>${b.rank ? `#${b.rank}` : '—'}<div class="small muted">${b.points} pts</div></td>`).join('')}</tr>`).join('')}
     </table></div></div>
     <div class="card"><h2>Publish standings</h2>
@@ -1142,7 +1309,19 @@ document.addEventListener('change', async (e) => {
   if (el.dataset.gridSpeech) {
     const cfg = ballotCfg(el.dataset.mode), id = Number(el.dataset.gridSpeech);
     el.blur();
-    await act('PUT', cfg.scorePath(id), el.value ? { points: Number(el.value), comment: cfg.scores[id]?.comment || '' } : { points: null }, 'Saved');
+    await act('PUT', cfg.scorePath(id), el.value ? { points: Number(el.value), comment: cfg.scores[id]?.comment || ui.notes?.[`s${id}`] || '' } : { points: null }, 'Saved');
+    return;
+  }
+  if (el.dataset.gridQuestion) {
+    const id = Number(el.dataset.gridQuestion);
+    el.blur();
+    await act('PUT', C(`/question-scores/${id}`), el.value ? { points: Number(el.value), comment: state.my_question_scores?.[id]?.comment || ui.notes?.[`q${id}`] || '' } : { points: null }, 'Saved');
+    return;
+  }
+  if (el.dataset.qcommentFor) {
+    const id = Number(el.dataset.qcommentFor), sc = state.my_question_scores?.[id];
+    if (!sc) { ui.notes = { ...(ui.notes || {}), [`q${id}`]: el.value }; toast('Note kept. It saves when you pick points.'); return; }
+    await act('PUT', C(`/question-scores/${id}`), { points: sc.points, comment: el.value }, 'Note saved');
     return;
   }
   if (el.dataset.gridPo) {
@@ -1152,8 +1331,8 @@ document.addEventListener('change', async (e) => {
   }
   if (el.dataset.commentFor) {
     const cfg = ballotCfg(el.dataset.mode), id = Number(el.dataset.commentFor), sc = cfg.scores[id];
-    if (!sc) { toast('Pick points first, then your comment is saved with them.', true); return; }
-    await act('PUT', cfg.scorePath(id), { points: sc.points, comment: el.value }, 'Comment saved');
+    if (!sc) { ui.notes = { ...(ui.notes || {}), [`s${id}`]: el.value }; toast('Note kept. It saves when you pick points.'); return; }
+    await act('PUT', cfg.scorePath(id), { points: sc.points, comment: el.value }, 'Note saved');
   } else if (el.dataset.poCommentFor) {
     const id = Number(el.dataset.poCommentFor), sc = state.my_po_scores.find((x) => x.po_user_id === id);
     if (!sc) { toast('Pick points first, then your comment is saved with them.', true); return; }
@@ -1235,9 +1414,9 @@ document.addEventListener('click', async (e) => {
     case 'delete-leg': if (confirm('Delete this legislation?')) await act('DELETE', C(`/legislation/${d.id}`), null, 'Deleted'); break;
     case 'score': {
       const cfg = ballotCfg(d.mode), id = Number(d.id), points = Number(d.points);
-      const comment = document.querySelector(`[data-comment-for="${id}"]`)?.value || '';
+      const comment = document.querySelector(`[data-comment-for="${id}"]`)?.value || ui.notes?.[`s${id}`] || '';
       const same = cfg.scores[id]?.points === points;
-      await act('PUT', cfg.scorePath(id), same ? { points: null } : { points, comment }, same ? 'Score cleared' : 'Saved');
+      if (await act('PUT', cfg.scorePath(id), same ? { points: null } : { points, comment }, same ? 'Score cleared' : 'Saved') && ui.notes) delete ui.notes[`s${id}`];
       break;
     }
     case 'chip': {
@@ -1249,19 +1428,34 @@ document.addEventListener('click', async (e) => {
       ta.value = text;
       const sc = cfg.scores[id];
       if (sc) await act('PUT', cfg.scorePath(id), { points: sc.points, comment: text });
-      else { b.classList.toggle('on'); toast('Added. Pick points to save it.'); }
+      else { ui.notes = { ...(ui.notes || {}), [`s${id}`]: text }; b.classList.toggle('on'); toast('Note kept. It saves when you pick points.'); }
       break;
     }
     case 'ballot-view': ui.ballotView = d.v; render(); break;
     case 'track-side': ui.trackSide = d.side; render(); break;
-    case 'track-speaker': {
-      const bill = trackBill();
-      const body = { speaker_id: Number(d.id), side: ui.trackSide || trackGuessSide(), ...(bill === 'other' ? { topic: trackTopic() } : { legislation_id: Number(bill) }) };
-      await closeMySpeechTime();
-      const r = await act('POST', C('/my-log'), body);
-      if (r) { ui.trackSide = null; startMyTimer('Speech', s.chamber.speech_seconds, r.speech_id); ui.trackBill = bill; await loadState(); }
+    case 'mark-side': ui.markSide = d.side; ui.trackSide = d.side; render(); break;
+    case 'mark-speech': {
+      const side = ui.markSide || (s.chamber.floor_mode === 'self' ? trackGuessSide() : (s.chamber.next_side || 'authorship'));
+      if (s.chamber.floor_mode === 'self') { ui.trackSide = side; document.dispatchEvent(new CustomEvent('track-speaker', { detail: Number(d.id) })); }
+      else if (await act('POST', C('/recognize'), { user_id: Number(d.id), side }, `${competitor(Number(d.id))?.display_name}: ${SIDE_LABEL[side]}`)) ui.markSide = null;
+      ui.markSide = null; break;
+    }
+    case 'mark-question': {
+      const x = liveCtx('chair');
+      if (!x.cur) { toast('Start a speech first.', true); break; }
+      if (s.chamber.floor_mode === 'self') await act('POST', C(`/my-log/${x.cur.id}/questions`), { questioner_id: Number(d.id) }, `Question: ${competitor(Number(d.id))?.display_name}`);
+      else await act('POST', C('/questions'), { user_id: Number(d.id) }, `Question: ${competitor(Number(d.id))?.display_name}`);
       break;
     }
+    case 'qscore': {
+      const id = Number(d.id), points = Number(d.points), cur = s.my_question_scores?.[id];
+      const comment = document.querySelector(`[data-qcomment-for="${id}"]`)?.value || ui.notes?.[`q${id}`] || '';
+      const same = cur?.points === points;
+      if (await act('PUT', C(`/question-scores/${id}`), same ? { points: null } : { points, comment }, same ? 'Score cleared' : 'Saved') && ui.notes) delete ui.notes[`q${id}`];
+      break;
+    }
+    case 'myq-delete': await act('DELETE', C(`/my-questions/${d.id}`), null, 'Removed'); break;
+    case 'track-speaker': await trackSpeaker(Number(d.id)); break;
     case 'track-timer': {
       const t = myTimer(); if (!t) break;
       if (d.a === 'pause' && t.running) setMyTimer({ ...t, running: false, elapsed_ms: t.elapsed_ms + (Date.now() - t.started_at) });

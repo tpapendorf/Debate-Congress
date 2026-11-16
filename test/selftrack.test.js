@@ -147,3 +147,44 @@ test('older databases gain speech logs without losing speeches or scores', () =>
   db.close();
   open(file).close(); // opening again is a no-op
 });
+
+test('question scores and notes: separate from point totals, private to the scorer', async () => {
+  const admin = client();
+  // setup already done by the first test in this file
+  await admin.ok('POST', '/api/login', { username: 'admin', password: 'secret1' });
+  const { users } = await admin.ok('POST', '/api/users/bulk', { text: 'Quinn Q, Lincoln\nRiley R, Lincoln\nSky S, Lincoln\nJudge Q, , judge' });
+  const [quinn, riley, sky, jq] = users;
+  const login = async (u) => { const c = client(); await c.ok('POST', '/api/login', { username: u.username, password: u.password }); return c; };
+  const cQ = await login(quinn), cR = await login(riley), cJ = await login(jq);
+  const { id } = await admin.ok('POST', '/api/chambers', { name: 'Q room' });
+  const P = (p) => `/api/chambers/${id}${p}`;
+  await admin.ok('POST', P('/members'), { user_ids: users.map((u) => u.id) });
+  await admin.ok('PUT', P(''), { po_user_id: sky.id });
+  await admin.ok('POST', P('/legislation'), { title: 'Bill Q' });
+  const bill = (await cJ.ok('GET', P('/state'))).legislation[0];
+  await admin.ok('POST', P(`/legislation/${bill.id}/begin`));
+  const { speech_id } = await admin.ok('POST', P('/recognize'), { user_id: quinn.id, side: 'authorship' });
+  await admin.ok('POST', P('/questions'), { user_id: riley.id });
+  let st = await cJ.ok('GET', P('/state'));
+  const qid = st.questions[0].id;
+  await cJ.ok('PUT', P(`/scores/${speech_id}`), { points: 5, comment: 'Clear' });
+  await cJ.ok('PUT', P(`/question-scores/${qid}`), { points: 4, comment: 'Sharp question' });
+  assert.equal((await cJ.call('PUT', P(`/question-scores/${qid}`), { points: 99 })).status, 400);
+  assert.equal((await cR.call('PUT', P(`/question-scores/${qid}`), { points: 6 })).status, 400, 'no scoring your own question');
+  await cQ.ok('PUT', P(`/question-scores/${qid}`), { points: 2, comment: 'practice' });
+  st = await cJ.ok('GET', P('/state'));
+  assert.deepEqual(st.my_question_scores[qid], { points: 4, comment: 'Sharp question' });
+  assert.equal(JSON.stringify(await cR.ok('GET', P('/state'))).includes('Sharp question'), false);
+  const res = await admin.ok('GET', P('/results'));
+  const r = res.rows.find((x) => x.id === riley.id);
+  assert.equal(r.question_points, 4, 'only judges count, practice scores do not');
+  assert.equal(r.total_points, 0, 'question points stay out of totals');
+  assert.match((await admin.call('GET', P('/results.csv'))).data, /Question points/);
+  // Published to the competitor: they see their own question score.
+  await cJ.ok('POST', P('/publish'), { target: 'ballot', level: 'individual' });
+  const refl = await cR.ok('GET', P('/reflection'));
+  assert.equal(refl.ballots[0].my_question_scores[0].points, 4);
+  // Removing the question removes its scores.
+  await admin.ok('DELETE', P(`/questions/${qid}`));
+  assert.equal((await cJ.ok('GET', P('/state'))).my_question_scores[qid], undefined);
+});

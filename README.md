@@ -34,6 +34,23 @@ Open **Teams** in the top bar.
 - **My prep** (private): speech plans tied to a bill and side, with status (idea, drafting, ready, delivered), an outline, and a panel of the team's research with **Insert** buttons that drop the argument and citation into the outline. A plan can be shared with coaches and captains. Private notes, optionally tied to a bill.
 - **Progress**: speeches given in this app, judge feedback that was published to the student, a hand-kept results log for other tournaments, and goals set by coaches. Coaches and captains get a team overview.
 
+## Live dashboard
+
+Every chamber opens on the screen that person uses most:
+
+| Role | Tabs |
+| --- | --- |
+| Judge | Dashboard, Ballot, Docket |
+| Presiding officer | Dashboard, Floor, Docket |
+| Competitor | Floor, Practice, My results, Docket |
+| Admin | Dashboard, Docket, Setup, Results |
+
+On phones the tabs sit in a bar at the bottom of the screen.
+
+The **Dashboard** shows who has the floor and the timer at the top, then a scoring panel for that speech and each question asked during it (points and a note, saved as you go), then a feed of the whole round where anything can be scored or annotated later. The roster on the side is in precedence order; whoever runs the floor taps **Speech** or **Q** beside a name. In a PO-run chamber that is the PO (or an admin), and the PO's session, docket, motion and vote controls sit under the roster. In a self-tracked chamber every judge and competitor marks speeches and questions in their own private log.
+
+**Question scores** use the same point scale. They appear in their own *Q pts* column in Results and the CSV and are never added to point totals or rankings. A note typed before points are picked is kept and saved with the points.
+
 ## Rounds without a PO in the app
 
 When the presiding officer isn't running the round in this app, an admin sets **Setup → Who runs the floor?** to *Each judge and competitor tracks for themselves*. Then:
