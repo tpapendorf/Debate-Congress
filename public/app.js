@@ -127,6 +127,7 @@ document.addEventListener('focusout', () => setTimeout(() => { if (pendingRender
 // The timer on screen belongs to the chamber (server clock) or to a personal tracker (this device's clock).
 function activeTimer() {
   if (tracker) return { t: tracker.data.timer, offset: 0 };
+  if (selfTracking()) return { t: myTimer(), offset: 0 };
   return { t: state?.chamber?.timer, offset: clockOffset };
 }
 function timerRemaining(t, offset = activeTimer().offset) {
@@ -247,7 +248,7 @@ async function renderUsers() {
 // ---------- chamber shell ----------
 function tabsFor(m) {
   const t = [['floor', 'Floor']];
-  if (m.canChair) t.push(['chair', 'Dashboard']);
+  if (m.canChair && state?.chamber?.floor_mode !== 'self') t.push(['chair', 'Dashboard']);
   if (m.isJudge) t.push(['score', 'Score']);
   if (m.isCompetitor) t.push(['practice', 'Practice ballot'], ['reflect', 'Reflection']);
   t.push(['docket', 'Docket'], ['log', 'Speech log']);
@@ -314,6 +315,18 @@ function viewFloor() {
   const myReq = s.requests.filter((r) => r.user_id === m.id).map((r) => r.kind);
   const mySpeeches = s.speeches.filter((x) => x.speaker_id === m.id);
   const canRise = m.isCompetitor && !m.isPO && c.current_legislation_id;
+  if (c.floor_mode === 'self') return `<div class="card"><h2>No PO in the app for this chamber</h2>
+    <p>Each person tracks the floor for themselves, and nobody else sees your log.</p>
+    <ul>${m.isJudge ? '<li>Judges: open <a href="#/c/' + c.id + '/score">Score</a>, tap a name when someone gets the floor, then score the speech right there.</li>' : ''}
+      ${m.isCompetitor ? '<li>Competitors: open <a href="#/c/' + c.id + '/practice">Practice ballot</a> to log speeches, run a timer and practice scoring.</li>' : ''}
+      ${m.isAdmin ? '<li>Admins can switch this back to a PO-run chamber in Setup.</li>' : ''}</ul></div>`;
+  return viewFloorPO();
+}
+function viewFloorPO() {
+  const s = state, m = s.me, c = s.chamber;
+  const myReq = s.requests.filter((r) => r.user_id === m.id).map((r) => r.kind);
+  const mySpeeches = s.speeches.filter((x) => x.speaker_id === m.id);
+  const canRise = m.isCompetitor && !m.isPO && c.current_legislation_id && c.floor_mode !== 'self';
   return `
     ${c.status === 'recess' ? '<div class="banner recess">The chamber is in recess.</div>' : ''}
     ${c.status === 'adjourned' ? '<div class="banner recess">The chamber has adjourned.</div>' : ''}
@@ -670,11 +683,13 @@ document.addEventListener('drop', (e) => {
 // Space bar starts/pauses the timer on a dashboard.
 document.addEventListener('keydown', (e) => {
   if (e.code !== 'Space' || isTyping() || e.target.closest?.('button,a,summary')) return;
-  const onDash = tracker || (state && currentTab() === 'chair' && state.me.canChair);
+  const self = selfTracking();
+  const onDash = tracker || self || (state && currentTab() === 'chair' && state.me.canChair);
   const t = activeTimer().t;
   if (!onDash || !t) return;
   e.preventDefault();
-  dashAction(dashScope(), 'timer', t.running ? 'pause' : 'resume');
+  if (self) document.querySelector('[data-act="track-timer"]')?.click();
+  else dashAction(dashScope(), 'timer', t.running ? 'pause' : 'resume');
 });
 
 // ---------- Judge scoring ----------
@@ -683,19 +698,114 @@ function scoreButtons(current, attrs) {
   for (let p = c.score_min; p <= c.score_max; p++) out.push(`<button class="${current === p ? 'on' : ''}" ${attrs} data-points="${p}">${p}</button>`);
   return `<div class="score-buttons">${out.join('')}</div>`;
 }
+// ---------- tracking the floor yourself (no PO in the app) ----------
+// Each judge or competitor keeps a private speech log; the timer runs on this device.
+function selfTracking() {
+  return !!(state && !tracker && state.chamber.floor_mode === 'self' && ['score', 'practice'].includes(currentTab()));
+}
+function allSpeeches() {
+  return [...state.speeches, ...(state.my_log || [])].sort((a, b) => a.recognized_at - b.recognized_at);
+}
+const timerKey = () => `congress.timer.${chamberId}.${state?.me?.id}`;
+let timerMem = {};
+function myTimer() {
+  try { const v = localStorage.getItem(timerKey()); if (v) return JSON.parse(v); if (v === null && !(timerKey() in timerMem)) return null; } catch { /* storage blocked */ }
+  return timerMem[timerKey()] || null;
+}
+function setMyTimer(t) {
+  timerMem[timerKey()] = t;
+  try { if (t) localStorage.setItem(timerKey(), JSON.stringify(t)); else localStorage.removeItem(timerKey()); } catch { /* keep it in memory */ }
+}
+function startMyTimer(label, secs, speechId) { setMyTimer({ label, duration: secs, started_at: Date.now(), elapsed_ms: 0, running: true, speech_id: speechId ?? myTimer()?.speech_id ?? null }); }
+// Save how long the current speech ran, the first time its speech timer stops.
+async function closeMySpeechTime() {
+  const t = myTimer();
+  if (!t || t.label !== 'Speech' || !t.speech_id) return;
+  const secs = Math.round(t.duration - timerRemaining(t, 0));
+  try { await api('PUT', C(`/my-log/${t.speech_id}`), { duration_seconds: secs }); } catch { /* speech was removed */ }
+}
+function trackBill() {
+  const s = state, log = s.my_log || [];
+  if (ui.trackBill !== undefined) return ui.trackBill;
+  const last = log[log.length - 1];
+  if (last) return last.legislation_id ? String(last.legislation_id) : 'other';
+  const open = s.legislation.find((l) => l.status === 'debating') || s.legislation.find((l) => l.status === 'pending');
+  return open ? String(open.id) : 'other';
+}
+function trackTopic() {
+  if (ui.trackTopic !== undefined) return ui.trackTopic;
+  const log = state.my_log || [], last = log[log.length - 1];
+  return last && !last.legislation_id ? last.topic : '';
+}
+function trackGuessSide() {
+  const bill = trackBill(), topic = trackTopic();
+  const on = (state.my_log || []).filter((x) => (bill === 'other' ? !x.legislation_id && x.topic === topic : String(x.legislation_id) === bill));
+  const last = on[on.length - 1];
+  return !last ? 'authorship' : (last.side === 'neg' ? 'aff' : 'neg');
+}
+// Who should speak next by the usual rule, from this person's own log: fewest speeches, then least recent, then seat.
+function myPrecedence() {
+  const log = state.my_log || [];
+  const stats = new Map(state.competitors.map((p) => [p.id, { n: 0, last: -1 }]));
+  for (const x of log) { const st = stats.get(x.speaker_id); if (st) { st.n += 1; st.last = x.recognized_at; } }
+  return state.competitors.filter((p) => !p.is_po)
+    .map((p) => ({ p, ...stats.get(p.id) }))
+    .sort((a, b) => (a.n - b.n) || (a.last - b.last) || ((a.p.seat ?? 0) - (b.p.seat ?? 0)));
+}
+function trackBar(cfg) {
+  const s = state, c = s.chamber, t = myTimer();
+  const side = ui.trackSide || trackGuessSide(), bill = trackBill();
+  const cur = t?.speech_id && (s.my_log || []).find((x) => x.id === t.speech_id);
+  const qSecs = cur && ['authorship', 'sponsorship'].includes(cur.side) ? c.authorship_question_seconds : c.question_seconds;
+  const dis = cfg.locked ? 'disabled' : '';
+  return `<div class="card trackbar">
+    <div class="spread"><h2 style="margin:0">Track the floor</h2><span class="small muted">No PO in the app here. Your log is private to you.</span></div>
+    <div class="track-grid">
+      <div class="stack">
+        <div class="inline-fields">
+          <div class="field"><label>Bill</label><select data-track="bill" ${dis}>${s.legislation.map((l) => `<option value="${l.id}" ${bill === String(l.id) ? 'selected' : ''}>${esc(l.title)}</option>`).join('')}<option value="other" ${bill === 'other' ? 'selected' : ''}>${s.legislation.length ? 'Something else…' : 'Type the bill name'}</option></select></div>
+          ${bill === 'other' ? `<div class="field"><label>Bill name</label><input data-track="topic" value="${esc(trackTopic())}" placeholder="e.g. A Bill to Reform Bail" ${dis}></div>` : ''}
+        </div>
+        <div class="field"><label>Next speech</label><div class="seg">${['authorship', 'aff', 'neg'].map((k) => `<button class="${side === k ? 'on' : ''}" data-act="track-side" data-side="${k}" ${dis}>${SIDE_LABEL[k]}</button>`).join('')}</div></div>
+        <div class="field"><label>Tap who gets the floor <span class="muted">(next up by precedence first)</span></label>
+          <div class="name-buttons">${myPrecedence().map(({ p, n }, i) => `<button class="${i === 0 ? 'primary' : ''}" data-act="track-speaker" data-id="${p.id}" ${dis}>${esc(p.display_name)}${n ? ` <span class="count">${n}</span>` : ''}</button>`).join('')}</div></div>
+      </div>
+      <div class="track-timer">
+        <div class="muted small">${cur ? `${esc(cur.speaker_name)} · ${SIDE_LABEL[cur.side]}` : 'Timer'}${t ? ` · ${esc(t.label)}${t.running ? '' : ' (paused)'}` : ''}</div>
+        ${timerHtml(t)}
+        <div class="row" style="justify-content:center">
+          ${t ? `<button class="${t.running ? '' : 'primary'}" data-act="track-timer" data-a="${t.running ? 'pause' : 'resume'}" title="Space bar">${t.running ? 'Pause' : 'Start'}</button>` : ''}
+          ${cur && t?.label === 'Speech' ? `<button data-act="track-questioning">Questioning ${fmtSecs(qSecs)}</button>` : ''}
+          ${t ? `<button data-act="track-end">${cur ? 'End speech' : 'Clear'}</button>` : ''}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+function logFixer(x) {
+  const s = state;
+  return `<details class="log-fix"><summary class="small muted">Fix this entry</summary>
+    <div class="inline-fields" style="margin-top:6px">
+      <select data-mylog="${x.id}" data-field="speaker_id">${s.competitors.map((p) => `<option value="${p.id}" ${p.id === x.speaker_id ? 'selected' : ''}>${esc(p.display_name)}</option>`).join('')}</select>
+      <select data-mylog="${x.id}" data-field="side">${['authorship', 'sponsorship', 'aff', 'neg'].map((k) => `<option value="${k}" ${k === x.side ? 'selected' : ''}>${SIDE_LABEL[k]}</option>`).join('')}</select>
+      <select data-mylog="${x.id}" data-field="legislation_id"><option value="">${x.topic ? esc(x.topic) : 'No bill picked'}</option>${s.legislation.map((l) => `<option value="${l.id}" ${l.id === x.legislation_id ? 'selected' : ''}>${esc(l.title)}</option>`).join('')}</select>
+    </div>
+    <button class="sm ghost" data-act="mylog-delete" data-id="${x.id}" style="margin-top:6px">Remove from my log</button></details>`;
+}
+
 // A ballot is the judge's real scoring sheet, or a competitor's practice sheet (same screen, never counted).
 const CHIPS = ['Clash', 'Evidence', 'Refutation', 'Delivery', 'Questioning', 'Organization', 'Time'];
 function ballotCfg(mode) {
   const s = state;
   return mode === 'judge'
     ? { mode, scores: s.my_scores, saved: s.my_rankings, locked: !!s.my_ballot?.submitted_at,
-        speeches: s.speeches, scorePath: (id) => C(`/scores/${id}`), rankPath: C('/rankings') }
+        speeches: allSpeeches(), scorePath: (id) => C(`/scores/${id}`), rankPath: C('/rankings') }
     : { mode, scores: s.my_practice_scores, saved: s.my_practice_rankings, locked: false,
-        speeches: s.speeches.filter((x) => x.speaker_id !== s.me.id), scorePath: (id) => C(`/practice/scores/${id}`), rankPath: C('/practice/rankings') };
+        speeches: allSpeeches().filter((x) => x.speaker_id !== s.me.id), scorePath: (id) => C(`/practice/scores/${id}`), rankPath: C('/practice/rankings') };
 }
 function pointsBy(cfg) {
   const tot = new Map();
-  for (const x of state.speeches) { const sc = cfg.scores[x.id]; if (sc) tot.set(x.speaker_id, (tot.get(x.speaker_id) || 0) + sc.points); }
+  for (const x of cfg.speeches) { const sc = cfg.scores[x.id]; if (sc) tot.set(x.speaker_id, (tot.get(x.speaker_id) || 0) + sc.points); }
   if (cfg.mode === 'judge') for (const p of state.my_po_scores) tot.set(p.po_user_id, (tot.get(p.po_user_id) || 0) + p.points);
   return tot;
 }
@@ -720,6 +830,7 @@ function speechCard(cfg, x, now) {
     ${scoreButtons(sc?.points, `data-act="score" data-mode="${cfg.mode}" data-id="${x.id}"`, cfg.locked)}
     <div class="chips">${CHIPS.map((ch) => `<button class="chip ${comment.includes(ch) ? 'on' : ''}" data-act="chip" data-mode="${cfg.mode}" data-id="${x.id}" data-chip="${ch}" ${cfg.locked ? 'disabled' : ''}>${ch}</button>`).join('')}</div>
     <textarea data-comment-for="${x.id}" data-mode="${cfg.mode}" placeholder="${cfg.mode === 'judge' ? 'Comments for the competitor (optional)' : 'Your notes (only you see these)'}" style="margin-top:8px;min-height:56px" ${cfg.locked ? 'disabled' : ''}>${esc(comment)}</textarea>
+    ${x.mine && !cfg.locked ? logFixer(x) : ''}
   </div>`;
 }
 function ballotGrid(cfg) {
@@ -763,7 +874,8 @@ function publishSelect(attrs, value) {
 function viewBallot(mode) {
   const s = state, c = s.chamber, cfg = ballotCfg(mode);
   const view = ui.ballotView || 'list';
-  const now = cfg.speeches.find((x) => x.id === c.current_speech_id);
+  const nowId = c.floor_mode === 'self' ? myTimer()?.speech_id : c.current_speech_id;
+  const now = cfg.speeches.find((x) => x.id === nowId);
   const rest = [...cfg.speeches].reverse().filter((x) => x !== now);
   const unscored = cfg.speeches.filter((x) => !cfg.scores[x.id]).length;
   const b = s.my_ballot;
@@ -774,13 +886,14 @@ function viewBallot(mode) {
       ? `Points ${c.score_min}–${c.score_max}. Your scores stay private unless you or an admin publish them.`
       : `Score speeches the way a judge would, then compare after results are published. This never counts, and only you can see it.`}</p>
       <div class="seg"><button class="${view === 'list' ? 'on' : ''}" data-act="ballot-view" data-v="list">List</button><button class="${view === 'grid' ? 'on' : ''}" data-act="ballot-view" data-v="grid">Grid</button></div></div>
+    ${c.floor_mode === 'self' ? trackBar(cfg) : ''}
     ${mode === 'judge' && b.submitted_at ? `<div class="banner submitted">Ballot submitted at ${fmtTime(b.submitted_at)}. Ask an admin to reopen it if you need to change something.</div>` : ''}
     <div class="grid side" style="margin-top:12px">
       <div>
         ${view === 'grid' ? ballotGrid(cfg) : `
           ${now ? speechCard(cfg, now, true) : ''}
           <div class="card"><h2>Speeches ${unscored ? `<span class="pill debating">${unscored} to score</span>` : ''}</h2>
-          ${rest.length ? rest.map((x) => speechCard(cfg, x, false)).join('') : (now ? '' : '<p class="muted">Speeches appear here as soon as the PO recognizes someone.</p>')}
+          ${rest.length ? rest.map((x) => speechCard(cfg, x, false)).join('') : (now ? '' : `<p class="muted">${c.floor_mode === 'self' ? 'Tap a name above when someone gets the floor, and their speech shows up here to score.' : 'Speeches appear here as soon as the PO recognizes someone.'}</p>`)}
           </div>`}
       </div>
       <div>
@@ -913,6 +1026,10 @@ function viewSetup() {
         <div class="field"><label>Authorship questioning (sec)</label><input name="authorship_question_seconds" type="number" value="${c.authorship_question_seconds}"></div>
         <div class="field"><label>Other questioning (sec)</label><input name="question_seconds" type="number" value="${c.question_seconds}"></div>
       </div>
+      <div class="field"><label>Who runs the floor?</label><select name="floor_mode">
+        <option value="po" ${c.floor_mode !== 'self' ? 'selected' : ''}>The presiding officer, in the app</option>
+        <option value="self" ${c.floor_mode === 'self' ? 'selected' : ''}>Each judge and competitor tracks for themselves</option></select>
+        <p class="small muted" style="margin:4px 0 0">Use the second option when the PO isn't running the round in this app. Judges then log speeches and time them on their own Score tab.</p></div>
       <div class="field"><label>Presiding officer (after the chamber elects one)</label><select name="po_user_id"><option value="">None yet</option>
         ${s.competitors.map((p) => `<option value="${p.id}" ${p.id === c.po_user_id ? 'selected' : ''}>${esc(p.display_name)}</option>`).join('')}</select></div>
       <button class="primary">Save settings</button>
@@ -996,6 +1113,17 @@ document.addEventListener('submit', async (e) => {
 // Judge comments save when the field loses focus.
 document.addEventListener('change', async (e) => {
   const el = e.target;
+  if (el.matches('[data-track]')) {
+    if (el.dataset.track === 'bill') { ui.trackBill = el.value; ui.trackSide = null; el.blur(); render(); }
+    else { ui.trackTopic = el.value.trim(); ui.trackSide = null; el.blur(); render(); }
+    return;
+  }
+  if (el.matches('[data-mylog]')) {
+    el.blur();
+    const v = el.value, f = el.dataset.field;
+    await act('PUT', C(`/my-log/${el.dataset.mylog}`), { [f]: f === 'side' ? v : (v ? Number(v) : null) }, 'Fixed');
+    return;
+  }
   if (el.matches('[data-viewas]')) {
     ui.viewAs = el.value ? Number(el.value) : null;
     ui.rankDraft = null; ui.results = null; ui.reflection = null;
@@ -1125,6 +1253,32 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'ballot-view': ui.ballotView = d.v; render(); break;
+    case 'track-side': ui.trackSide = d.side; render(); break;
+    case 'track-speaker': {
+      const bill = trackBill();
+      const body = { speaker_id: Number(d.id), side: ui.trackSide || trackGuessSide(), ...(bill === 'other' ? { topic: trackTopic() } : { legislation_id: Number(bill) }) };
+      await closeMySpeechTime();
+      const r = await act('POST', C('/my-log'), body);
+      if (r) { ui.trackSide = null; startMyTimer('Speech', s.chamber.speech_seconds, r.speech_id); ui.trackBill = bill; await loadState(); }
+      break;
+    }
+    case 'track-timer': {
+      const t = myTimer(); if (!t) break;
+      if (d.a === 'pause' && t.running) setMyTimer({ ...t, running: false, elapsed_ms: t.elapsed_ms + (Date.now() - t.started_at) });
+      else if (d.a === 'resume' && !t.running) setMyTimer({ ...t, running: true, started_at: Date.now() });
+      render(); break;
+    }
+    case 'track-questioning': {
+      const t = myTimer(), cur = t && (s.my_log || []).find((x) => x.id === t.speech_id);
+      await closeMySpeechTime();
+      startMyTimer('Questioning', cur && ['authorship', 'sponsorship'].includes(cur.side) ? s.chamber.authorship_question_seconds : s.chamber.question_seconds);
+      await loadState(); break;
+    }
+    case 'track-end': await closeMySpeechTime(); setMyTimer(null); await loadState(); break;
+    case 'mylog-delete': if (confirm('Remove this speech from your log? Any points you gave it are removed too.')) {
+      if (myTimer()?.speech_id === Number(d.id)) setMyTimer(null);
+      await act('DELETE', C(`/my-log/${d.id}`), null, 'Removed');
+    } break;
     case 'rank-fill': ui.rankDraft = suggestedRanking(ballotCfg(s.me.isJudge ? 'judge' : 'practice')); render(); break;
     case 'submit-ballot': {
       const cfg = ballotCfg('judge'), unsaved = JSON.stringify(ui.rankDraft ?? suggestedRanking(cfg)) !== JSON.stringify(cfg.saved);
