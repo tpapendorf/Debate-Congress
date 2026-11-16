@@ -672,8 +672,22 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     if (!Number.isInteger(n) || n < c.score_min || n > c.score_max) throw bad(`Points must be from ${c.score_min} to ${c.score_max}.`);
     return n;
   }
+  function ballotOf(c, judgeId) {
+    return q('SELECT * FROM judge_ballots WHERE chamber_id = ? AND judge_id = ?').get(c.id, judgeId)
+      || { chamber_id: c.id, judge_id: judgeId, submitted_at: null, publish: 'private' };
+  }
+  function upsertBallot(c, judgeId, fields) {
+    const b = { ...ballotOf(c, judgeId), ...fields };
+    q(`INSERT INTO judge_ballots (chamber_id, judge_id, submitted_at, publish) VALUES (?, ?, ?, ?)
+       ON CONFLICT (chamber_id, judge_id) DO UPDATE SET submitted_at = excluded.submitted_at, publish = excluded.publish`)
+      .run(c.id, judgeId, b.submitted_at, b.publish);
+  }
+  function assertOpen(c, judgeId) {
+    if (ballotOf(c, judgeId).submitted_at) throw bad('Your ballot is submitted. Ask an admin to reopen it to make changes.');
+  }
   app.put('/api/chambers/:id/scores/:sid', wrap((req) => {
     const { c, user } = loadChamber(req, 'judge');
+    assertOpen(c, user.id);
     const s = q('SELECT id FROM speeches WHERE id = ? AND chamber_id = ?').get(Number(req.params.sid), c.id);
     if (!s) throw notFound('Speech not found.');
     const b = req.body || {};
@@ -688,6 +702,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
   }));
   app.put('/api/chambers/:id/po-score', wrap((req) => {
     const { c, user } = loadChamber(req, 'judge');
+    assertOpen(c, user.id);
     const b = req.body || {};
     const po = Number(b.po_user_id || c.po_user_id);
     if (!po) throw bad('There is no presiding officer to score.');
@@ -698,6 +713,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
   }));
   app.put('/api/chambers/:id/rankings', wrap((req) => {
     const { c, user } = loadChamber(req, 'judge');
+    assertOpen(c, user.id);
     const ids = ((req.body || {}).user_ids || []).map(Number);
     if (ids.length > c.rank_count) throw bad(`Rank at most ${c.rank_count} competitors.`);
     if (new Set(ids).size !== ids.length) throw bad('Each competitor can be ranked only once.');
@@ -709,6 +725,107 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
       ids.forEach((id, i) => ins.run(c.id, user.id, id, i + 1));
     });
     return { ok: true };
+  }));
+
+  // ---------- ballots: submit, reopen, publish ----------
+  app.post('/api/chambers/:id/ballot/submit', wrap((req) => {
+    const { c, user } = loadChamber(req, 'judge');
+    if (!q('SELECT 1 FROM rankings WHERE chamber_id = ? AND judge_id = ?').get(c.id, user.id)) throw bad('Save your ranking before submitting.');
+    upsertBallot(c, user.id, { submitted_at: Date.now() });
+    return done(c);
+  }));
+  app.post('/api/chambers/:id/ballots/:jid/reopen', wrap((req) => {
+    const { c } = loadChamber(req, 'admin');
+    upsertBallot(c, Number(req.params.jid), { submitted_at: null });
+    return done(c);
+  }));
+  // A judge publishes their own ballot; an admin can publish any ballot or the combined standings.
+  // Levels: private | individual (each competitor sees only what they received) | all (everyone sees totals and rankings).
+  app.post('/api/chambers/:id/publish', wrap((req) => {
+    const { c, user, m } = loadChamber(req);
+    const { target, judge_id, level } = req.body || {};
+    if (!['private', 'individual', 'all'].includes(level)) throw bad('Pick private, each competitor, or everyone.');
+    if (target === 'standings') {
+      if (!m.isAdmin) throw forbidden('Only an admin can publish the standings.');
+      q('UPDATE chambers SET standings_publish = ? WHERE id = ?').run(level, c.id);
+    } else if (target === 'ballot') {
+      const jid = Number(judge_id || user.id);
+      if (!m.isAdmin && !(m.isJudge && jid === user.id)) throw forbidden('Judges can only publish their own ballot.');
+      if (!q(`SELECT 1 FROM chamber_members cm JOIN users u ON u.id = cm.user_id WHERE cm.chamber_id = ? AND u.id = ? AND u.role = 'judge'`).get(c.id, jid)) throw bad('Not a judge in this chamber.');
+      upsertBallot(c, jid, { publish: level });
+    } else throw bad('Publish a ballot or the standings.');
+    return done(c);
+  }));
+
+  // ---------- practice ballots (competitors score for reflection; never counted) ----------
+  app.put('/api/chambers/:id/practice/scores/:sid', wrap((req) => {
+    const { c, user } = loadChamber(req, 'competitor');
+    const s = q('SELECT id, speaker_id FROM speeches WHERE id = ? AND chamber_id = ?').get(Number(req.params.sid), c.id);
+    if (!s) throw notFound('Speech not found.');
+    if (s.speaker_id === user.id) throw bad('You cannot score your own speech.');
+    const b = req.body || {};
+    if (b.points === null || b.points === '') {
+      q('DELETE FROM practice_scores WHERE speech_id = ? AND user_id = ?').run(s.id, user.id);
+      return { ok: true };
+    }
+    q(`INSERT INTO practice_scores (speech_id, user_id, points, comment, updated_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (speech_id, user_id) DO UPDATE SET points = excluded.points, comment = excluded.comment, updated_at = excluded.updated_at`)
+      .run(s.id, user.id, checkPoints(c, b.points), String(b.comment || '').slice(0, 2000), Date.now());
+    return { ok: true };
+  }));
+  app.put('/api/chambers/:id/practice/rankings', wrap((req) => {
+    const { c, user } = loadChamber(req, 'competitor');
+    const ids = ((req.body || {}).user_ids || []).map(Number);
+    if (ids.length > c.rank_count) throw bad(`Rank at most ${c.rank_count} competitors.`);
+    if (new Set(ids).size !== ids.length) throw bad('Each competitor can be ranked only once.');
+    const ok = q(`SELECT 1 FROM chamber_members m JOIN users u ON u.id = m.user_id WHERE m.chamber_id = ? AND u.id = ? AND u.role = 'competitor'`);
+    for (const id of ids) if (!ok.get(c.id, id)) throw bad('You can only rank competitors in this chamber.');
+    tx(() => {
+      q('DELETE FROM practice_rankings WHERE chamber_id = ? AND user_id = ?').run(c.id, user.id);
+      const ins = q('INSERT INTO practice_rankings (chamber_id, user_id, ranked_user_id, rank) VALUES (?, ?, ?, ?)');
+      ids.forEach((id, i) => ins.run(c.id, user.id, id, i + 1));
+    });
+    return { ok: true };
+  }));
+
+  // What a competitor may see after publishing: their own practice ballot, plus anything a judge or admin published.
+  app.get('/api/chambers/:id/reflection', wrap((req) => {
+    const { c, user } = loadChamber(req, 'competitor');
+    const judges = q(`SELECT u.id, u.display_name FROM chamber_members m JOIN users u ON u.id = m.user_id
+                      WHERE m.chamber_id = ? AND u.role = 'judge' ORDER BY u.display_name`).all(c.id);
+    const comps = competitorsWithStats(c);
+    const nameOf = new Map(comps.map((x) => [x.id, x.display_name]));
+    const practice = {
+      scores: q(`SELECT p.speech_id, p.points, p.comment, s.speaker_id FROM practice_scores p JOIN speeches s ON s.id = p.speech_id
+                 WHERE s.chamber_id = ? AND p.user_id = ?`).all(c.id, user.id),
+      ranking: q('SELECT ranked_user_id FROM practice_rankings WHERE chamber_id = ? AND user_id = ? ORDER BY rank').all(c.id, user.id).map((r) => r.ranked_user_id),
+    };
+    const ballots = [];
+    for (const j of judges) {
+      const b = ballotOf(c, j.id);
+      if (b.publish === 'private') continue;
+      const mine = q(`SELECT ss.speech_id, ss.points, ss.comment FROM speech_scores ss JOIN speeches s ON s.id = ss.speech_id
+                      WHERE s.chamber_id = ? AND ss.judge_id = ? AND s.speaker_id = ?`).all(c.id, j.id, user.id);
+      const po = q('SELECT points, comment FROM po_scores WHERE chamber_id = ? AND judge_id = ? AND po_user_id = ?').get(c.id, j.id, user.id) || null;
+      const myRank = q('SELECT rank FROM rankings WHERE chamber_id = ? AND judge_id = ? AND user_id = ?').get(c.id, j.id, user.id)?.rank ?? null;
+      const entry = { judge_id: j.id, judge_name: j.display_name, level: b.publish, my_scores: mine, my_po_score: po, my_rank: myRank };
+      if (b.publish === 'all') {
+        // Everyone sees each competitor's point total and the judge's ranking, not other people's comments.
+        const totals = new Map();
+        for (const r of q(`SELECT s.speaker_id uid, ss.points FROM speech_scores ss JOIN speeches s ON s.id = ss.speech_id WHERE s.chamber_id = ? AND ss.judge_id = ?`).all(c.id, j.id)) totals.set(r.uid, (totals.get(r.uid) || 0) + r.points);
+        for (const r of q('SELECT po_user_id uid, points FROM po_scores WHERE chamber_id = ? AND judge_id = ?').all(c.id, j.id)) totals.set(r.uid, (totals.get(r.uid) || 0) + r.points);
+        entry.totals = comps.map((x) => ({ id: x.id, name: x.display_name, points: totals.get(x.id) || 0 }));
+        entry.ranking = q('SELECT user_id FROM rankings WHERE chamber_id = ? AND judge_id = ? ORDER BY rank').all(c.id, j.id).map((r) => ({ id: r.user_id, name: nameOf.get(r.user_id) }));
+      }
+      ballots.push(entry);
+    }
+    let standings = null;
+    if (c.standings_publish !== 'private') {
+      const r = computeResults(c);
+      const strip = (x) => ({ place: x.place, id: x.id, name: x.name, school: x.school, was_po: x.was_po, speeches: x.speeches, total_points: x.total_points, average_points: x.average_points, rank_total: x.rank_total });
+      standings = { level: c.standings_publish, rows: c.standings_publish === 'all' ? r.rows.map(strip) : r.rows.filter((x) => x.id === user.id).map(strip), of: r.rows.length };
+    }
+    return { practice, ballots, standings, rank_count: c.rank_count };
   }));
 
   // ---------- state (what each role sees) ----------
@@ -844,6 +961,16 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
                                             WHERE s.chamber_id = ? AND ss.judge_id = ?`).all(c.id, user.id).map((r) => [r.speech_id, { points: r.points, comment: r.comment }]));
       out.my_po_scores = q('SELECT po_user_id, points, comment FROM po_scores WHERE chamber_id = ? AND judge_id = ?').all(c.id, user.id);
       out.my_rankings = q('SELECT user_id FROM rankings WHERE chamber_id = ? AND judge_id = ? ORDER BY rank').all(c.id, user.id).map((r) => r.user_id);
+      out.my_ballot = ballotOf(c, user.id);
+    }
+    if (m.isCompetitor) {
+      out.my_practice_scores = Object.fromEntries(q(`SELECT p.speech_id, p.points, p.comment FROM practice_scores p JOIN speeches s ON s.id = p.speech_id
+                                                     WHERE s.chamber_id = ? AND p.user_id = ?`).all(c.id, user.id).map((r) => [r.speech_id, { points: r.points, comment: r.comment }]));
+      out.my_practice_rankings = q('SELECT ranked_user_id FROM practice_rankings WHERE chamber_id = ? AND user_id = ? ORDER BY rank').all(c.id, user.id).map((r) => r.ranked_user_id);
+      out.published = {
+        ballots: q(`SELECT COUNT(*) n FROM judge_ballots WHERE chamber_id = ? AND publish != 'private'`).get(c.id).n,
+        standings: c.standings_publish,
+      };
     }
     return out;
   }));
@@ -879,12 +1006,12 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     rows.sort((a, b) => (a.rank_total - b.rank_total) || (b.total_points - a.total_points) || a.name.localeCompare(b.name));
     rows.forEach((r, i) => { r.place = i + 1; });
     const progress = judges.map((j) => ({
-      judge_id: j.id, name: j.display_name,
+      judge_id: j.id, name: j.display_name, submitted_at: ballotOf(c, j.id).submitted_at, publish: ballotOf(c, j.id).publish,
       scored: scores.filter((s) => s.judge_id === j.id).length,
       ranked: ranks.filter((r) => r.judge_id === j.id).length,
       po_scored: po.some((s) => s.judge_id === j.id),
     }));
-    return { judges, rows, progress, total_speeches: q('SELECT COUNT(*) n FROM speeches WHERE chamber_id = ?').get(c.id).n, unranked_value: unranked };
+    return { judges, rows, progress, standings_publish: c.standings_publish, total_speeches: q('SELECT COUNT(*) n FROM speeches WHERE chamber_id = ?').get(c.id).n, unranked_value: unranked };
   }
   app.get('/api/chambers/:id/results', wrap((req) => {
     const { c } = loadChamber(req, 'admin');

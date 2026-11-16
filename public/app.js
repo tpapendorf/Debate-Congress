@@ -65,7 +65,7 @@ async function route() {
   if (parts[0] === 'c' && parts[1]) {
     const id = Number(parts[1]);
     tracker = null;
-    if (id !== chamberId) { chamberId = id; state = null; ui = { ...ui, results: null, rankDraft: null, viewAs: null }; openEvents(); }
+    if (id !== chamberId) { chamberId = id; state = null; ui = { ...ui, results: null, rankDraft: null, viewAs: null, reflection: null }; openEvents(); }
     if (!state) await loadState(); else render();
     return;
   }
@@ -98,8 +98,10 @@ async function loadState() {
     const s = await api('GET', C('/state'));
     clockOffset = s.server_now - Date.now();
     state = s;
-    if (ui.rankDraft === null && state.my_rankings) ui.rankDraft = [...state.my_rankings];
+    const savedRanks = state.my_rankings || state.my_practice_rankings;
+    if (ui.rankDraft === null && savedRanks?.length) ui.rankDraft = [...savedRanks];
     if (currentTab() === 'results' && state.me.isAdmin) ui.results = await api('GET', C('/results'));
+    if (currentTab() === 'reflect' && state.me.isCompetitor) ui.reflection = await api('GET', C('/reflection'));
     render();
   } catch (e) {
     $view.innerHTML = `<div class="card"><p>${esc(e.message)}</p><a href="#/">Back</a></div>`;
@@ -243,6 +245,7 @@ function tabsFor(m) {
   const t = [['floor', 'Floor']];
   if (m.canChair) t.push(['chair', 'Dashboard']);
   if (m.isJudge) t.push(['score', 'Score']);
+  if (m.isCompetitor) t.push(['practice', 'Practice ballot'], ['reflect', 'Reflection']);
   t.push(['docket', 'Docket'], ['log', 'Speech log']);
   if (m.isAdmin) t.push(['setup', 'Setup'], ['results', 'Results']);
   return t;
@@ -252,7 +255,7 @@ function renderChamber() {
   const tabs = tabsFor(m);
   let tab = currentTab();
   if (!tabs.some(([k]) => k === tab)) tab = 'floor';
-  const body = { floor: viewFloor, chair: viewChair, score: viewScore, docket: viewDocket, log: viewLog, setup: viewSetup, results: viewResults }[tab]();
+  const body = { floor: viewFloor, chair: viewChair, score: () => viewBallot('judge'), practice: () => viewBallot('practice'), reflect: viewReflection, docket: viewDocket, log: viewLog, setup: viewSetup, results: viewResults }[tab]();
   document.body.classList.toggle('wide', tab === 'chair');
   const viewAs = s.view_as_options ? `<div class="card viewas row">
       <strong>Mock tournament.</strong> <label for="viewas" style="margin:0">View as</label>
@@ -676,46 +679,170 @@ function scoreButtons(current, attrs) {
   for (let p = c.score_min; p <= c.score_max; p++) out.push(`<button class="${current === p ? 'on' : ''}" ${attrs} data-points="${p}">${p}</button>`);
   return `<div class="score-buttons">${out.join('')}</div>`;
 }
-function viewScore() {
+// A ballot is the judge's real scoring sheet, or a competitor's practice sheet (same screen, never counted).
+const CHIPS = ['Clash', 'Evidence', 'Refutation', 'Delivery', 'Questioning', 'Organization', 'Time'];
+function ballotCfg(mode) {
+  const s = state;
+  return mode === 'judge'
+    ? { mode, scores: s.my_scores, saved: s.my_rankings, locked: !!s.my_ballot?.submitted_at,
+        speeches: s.speeches, scorePath: (id) => C(`/scores/${id}`), rankPath: C('/rankings') }
+    : { mode, scores: s.my_practice_scores, saved: s.my_practice_rankings, locked: false,
+        speeches: s.speeches.filter((x) => x.speaker_id !== s.me.id), scorePath: (id) => C(`/practice/scores/${id}`), rankPath: C('/practice/rankings') };
+}
+function pointsBy(cfg) {
+  const tot = new Map();
+  for (const x of state.speeches) { const sc = cfg.scores[x.id]; if (sc) tot.set(x.speaker_id, (tot.get(x.speaker_id) || 0) + sc.points); }
+  if (cfg.mode === 'judge') for (const p of state.my_po_scores) tot.set(p.po_user_id, (tot.get(p.po_user_id) || 0) + p.points);
+  return tot;
+}
+function suggestedRanking(cfg) {
+  const tot = pointsBy(cfg);
+  return [...tot.entries()].filter(([id]) => cfg.mode === 'judge' || id !== state.me.id)
+    .sort((a, b) => (b[1] - a[1]) || (competitor(a[0])?.display_name || '').localeCompare(competitor(b[0])?.display_name || ''))
+    .slice(0, state.chamber.rank_count).map(([id]) => id);
+}
+function scoreButtons(current, attrs, disabled) {
+  const c = state.chamber, out = [];
+  for (let p = c.score_min; p <= c.score_max; p++) out.push(`<button class="${current === p ? 'on' : ''}" ${attrs} data-points="${p}" ${disabled ? 'disabled' : ''}>${p}</button>`);
+  return `<div class="score-buttons">${out.join('')}</div>`;
+}
+function speechCard(cfg, x, now) {
+  const sc = cfg.scores[x.id], c = state.chamber;
+  const comment = sc?.comment || '';
+  return `<div class="card ${sc ? '' : 'unscored'} ${now ? 'now' : ''}" style="margin-bottom:10px">
+    <div class="spread"><div>${now ? '<span class="pill debating">Speaking now</span> ' : ''}<strong>${esc(x.speaker_name)}</strong> <span class="pill ${x.side}">${SIDE_LABEL[x.side]}</span></div>
+    <span class="small muted">${fmtTime(x.recognized_at)}${x.duration_seconds != null ? ` · ${fmtSecs(x.duration_seconds)}` : ''}</span></div>
+    <div class="small muted" style="margin:4px 0 8px">${esc(x.legislation_title)}</div>
+    ${scoreButtons(sc?.points, `data-act="score" data-mode="${cfg.mode}" data-id="${x.id}"`, cfg.locked)}
+    <div class="chips">${CHIPS.map((ch) => `<button class="chip ${comment.includes(ch) ? 'on' : ''}" data-act="chip" data-mode="${cfg.mode}" data-id="${x.id}" data-chip="${ch}" ${cfg.locked ? 'disabled' : ''}>${ch}</button>`).join('')}</div>
+    <textarea data-comment-for="${x.id}" data-mode="${cfg.mode}" placeholder="${cfg.mode === 'judge' ? 'Comments for the competitor (optional)' : 'Your notes (only you see these)'}" style="margin-top:8px;min-height:56px" ${cfg.locked ? 'disabled' : ''}>${esc(comment)}</textarea>
+  </div>`;
+}
+function ballotGrid(cfg) {
   const s = state, c = s.chamber;
-  const speeches = [...s.speeches].reverse();
-  const unscored = speeches.filter((x) => !s.my_scores[x.id]).length;
-  const draft = ui.rankDraft || [];
-  const rankable = s.competitors;
-  const poScores = new Map(s.my_po_scores.map((x) => [x.po_user_id, x]));
-  const pos = [...new Set([c.po_user_id, ...s.my_po_scores.map((x) => x.po_user_id)].filter(Boolean))];
+  const people = s.competitors.filter((p) => cfg.mode === 'judge' || p.id !== s.me.id);
+  const bySpeaker = new Map(people.map((p) => [p.id, cfg.speeches.filter((x) => x.speaker_id === p.id)]));
+  const cols = Math.max(1, ...[...bySpeaker.values()].map((v) => v.length));
+  const tot = pointsBy(cfg);
+  const opts = (cur) => `<option value="">—</option>${Array.from({ length: c.score_max - c.score_min + 1 }, (_, i) => c.score_min + i).map((p) => `<option ${cur === p ? 'selected' : ''}>${p}</option>`).join('')}`;
+  const poScore = (id) => s.my_po_scores?.find((x) => x.po_user_id === id);
+  return `<div class="card"><div class="table-wrap"><table class="grid-ballot">
+    <tr><th>Competitor</th>${Array.from({ length: cols }, (_, i) => `<th>Speech ${i + 1}</th>`).join('')}${cfg.mode === 'judge' ? '<th>PO</th>' : ''}<th>Total</th></tr>
+    ${people.map((p) => `<tr><td><strong>${esc(p.display_name)}</strong>${p.is_po ? ' <span class="pill">PO</span>' : ''}<div class="small muted">${esc(p.school)}</div></td>
+      ${Array.from({ length: cols }, (_, i) => { const x = bySpeaker.get(p.id)[i]; if (!x) return '<td></td>';
+        const sc = cfg.scores[x.id];
+        return `<td class="${sc ? '' : 'missing'}"><select data-grid-speech="${x.id}" data-mode="${cfg.mode}" ${cfg.locked ? 'disabled' : ''} title="${esc(x.legislation_title)} · ${SIDE_LABEL[x.side]}">${opts(sc?.points)}</select><div class="small muted">${SIDE_LABEL[x.side].slice(0, 3)}</div></td>`; }).join('')}
+      ${cfg.mode === 'judge' ? `<td>${p.is_po || poScore(p.id) ? `<select data-grid-po="${p.id}" ${cfg.locked ? 'disabled' : ''}>${opts(poScore(p.id)?.points)}</select>` : ''}</td>` : ''}
+      <td class="num"><strong>${tot.get(p.id) || 0}</strong></td></tr>`).join('')}
+  </table></div><p class="small muted">Pick points in each box; they save right away. Switch to List to add comments.</p></div>`;
+}
+function rankingCard(cfg) {
+  const s = state, c = s.chamber;
+  const suggested = ui.rankDraft === null;
+  const draft = ui.rankDraft ?? suggestedRanking(cfg);
+  const rankable = s.competitors.filter((p) => cfg.mode === 'judge' || p.id !== s.me.id);
+  const dis = cfg.locked ? 'disabled' : '';
+  return `<div class="card"><h2>${cfg.mode === 'judge' ? 'Final ranking' : 'Your ranking'} (top ${c.rank_count})</h2>
+    <p class="small muted">${suggested && draft.length ? 'Suggested from your points. Adjust it, then save.' : 'Best first. Tap names to add them; the PO can be ranked too.'}</p>
+    <ol>${draft.map((id, i) => `<li class="spread" style="padding:4px 0"><span>${esc(competitor(id)?.display_name)}</span>
+      <span class="row"><button class="sm ghost" data-act="rank-up" data-i="${i}" ${i === 0 || cfg.locked ? 'disabled' : ''}>↑</button><button class="sm ghost" data-act="rank-remove" data-i="${i}" ${dis}>✕</button></span></li>`).join('')}</ol>
+    <div class="row">${rankable.filter((p) => !draft.includes(p.id)).map((p) => `<button class="sm" data-act="rank-add" data-id="${p.id}" ${draft.length >= c.rank_count || cfg.locked ? 'disabled' : ''}>${esc(p.display_name)}${p.is_po ? ' (PO)' : ''}</button>`).join('')}</div>
+    <div class="row" style="margin-top:10px"><button class="primary" data-act="save-ranks" data-mode="${cfg.mode}" ${dis}>Save ranking</button>
+      <button class="sm" data-act="rank-fill" ${dis}>Fill from my points</button>
+      ${JSON.stringify(draft) !== JSON.stringify(cfg.saved) ? '<span class="small muted">Not saved yet</span>' : (cfg.saved.length ? '<span class="small muted">Saved</span>' : '')}</div>
+  </div>`;
+}
+const PUBLISH_LABEL = { private: 'Private', individual: 'Each competitor sees their own scores', all: 'Everyone sees totals and rankings' };
+function publishSelect(attrs, value) {
+  return `<select ${attrs}>${Object.entries(PUBLISH_LABEL).map(([k, v]) => `<option value="${k}" ${value === k ? 'selected' : ''}>${v}</option>`).join('')}</select>`;
+}
+function viewBallot(mode) {
+  const s = state, c = s.chamber, cfg = ballotCfg(mode);
+  const view = ui.ballotView || 'list';
+  const now = cfg.speeches.find((x) => x.id === c.current_speech_id);
+  const rest = [...cfg.speeches].reverse().filter((x) => x !== now);
+  const unscored = cfg.speeches.filter((x) => !cfg.scores[x.id]).length;
+  const b = s.my_ballot;
+  const poScores = new Map((s.my_po_scores || []).map((x) => [x.po_user_id, x]));
+  const pos = mode === 'judge' ? [...new Set([c.po_user_id, ...s.my_po_scores.map((x) => x.po_user_id)].filter(Boolean))] : [];
   return `
-    <p class="muted small">Your scores are private. Competitors never see them; only tournament admins see totals. Points range ${c.score_min}–${c.score_max}.</p>
-    <div class="grid side">
+    <div class="spread"><p class="muted small" style="margin:0">${mode === 'judge'
+      ? `Points ${c.score_min}–${c.score_max}. Your scores stay private unless you or an admin publish them.`
+      : `Score speeches the way a judge would, then compare after results are published. This never counts, and only you can see it.`}</p>
+      <div class="seg"><button class="${view === 'list' ? 'on' : ''}" data-act="ballot-view" data-v="list">List</button><button class="${view === 'grid' ? 'on' : ''}" data-act="ballot-view" data-v="grid">Grid</button></div></div>
+    ${mode === 'judge' && b.submitted_at ? `<div class="banner submitted">Ballot submitted at ${fmtTime(b.submitted_at)}. Ask an admin to reopen it if you need to change something.</div>` : ''}
+    <div class="grid side" style="margin-top:12px">
       <div>
-        <div class="card"><h2>Speeches ${unscored ? `<span class="pill debating">${unscored} to score</span>` : ''}</h2>
-        ${speeches.length ? speeches.map((x) => {
-          const sc = s.my_scores[x.id];
-          return `<div class="card ${sc ? '' : 'unscored'}" style="margin-bottom:10px">
-            <div class="spread"><div><strong>${esc(x.speaker_name)}</strong> <span class="pill ${x.side}">${SIDE_LABEL[x.side]}</span>${x.id === c.current_speech_id ? ' <span class="pill debating">speaking now</span>' : ''}</div>
-            <span class="small muted">${fmtTime(x.recognized_at)}${x.duration_seconds != null ? ` · ${fmtSecs(x.duration_seconds)}` : ''}</span></div>
-            <div class="small muted" style="margin:4px 0 8px">${esc(x.legislation_title)}</div>
-            ${scoreButtons(sc?.points, `data-act="score" data-id="${x.id}"`)}
-            <textarea data-comment-for="${x.id}" placeholder="Comments for the competitor (optional)" style="margin-top:8px;min-height:60px">${esc(sc?.comment || '')}</textarea>
-          </div>`;
-        }).join('') : '<p class="muted">No speeches yet. They appear here as soon as the PO recognizes someone.</p>'}
-        </div>
+        ${view === 'grid' ? ballotGrid(cfg) : `
+          ${now ? speechCard(cfg, now, true) : ''}
+          <div class="card"><h2>Speeches ${unscored ? `<span class="pill debating">${unscored} to score</span>` : ''}</h2>
+          ${rest.length ? rest.map((x) => speechCard(cfg, x, false)).join('') : (now ? '' : '<p class="muted">Speeches appear here as soon as the PO recognizes someone.</p>')}
+          </div>`}
       </div>
       <div>
-        <div class="card"><h2>Presiding officer</h2>
+        ${mode === 'judge' ? `<div class="card"><h2>Presiding officer</h2>
           ${pos.length ? pos.map((id) => { const sc = poScores.get(id); const p = competitor(id); return `
             <div style="margin-bottom:10px"><strong>${esc(p?.display_name || 'PO')}</strong>
-            ${scoreButtons(sc?.points, `data-act="po-score" data-id="${id}"`)}
-            <textarea data-po-comment-for="${id}" placeholder="Comments on presiding (optional)" style="margin-top:8px;min-height:60px">${esc(sc?.comment || '')}</textarea></div>`; }).join('')
+            ${scoreButtons(sc?.points, `data-act="po-score" data-id="${id}"`, cfg.locked)}
+            <textarea data-po-comment-for="${id}" placeholder="Comments on presiding (optional)" style="margin-top:8px;min-height:56px" ${cfg.locked ? 'disabled' : ''}>${esc(sc?.comment || '')}</textarea></div>`; }).join('')
           : '<p class="muted">No presiding officer assigned yet.</p>'}
-        </div>
-        <div class="card"><h2>Final ranking (top ${c.rank_count})</h2>
-          <p class="small muted">Tap names in order, best first. The PO can be ranked too.</p>
-          <ol>${draft.map((id, i) => `<li class="spread" style="padding:4px 0"><span>${esc(competitor(id)?.display_name)}</span>
-            <span class="row"><button class="sm ghost" data-act="rank-up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>↑</button><button class="sm ghost" data-act="rank-remove" data-i="${i}">✕</button></span></li>`).join('')}</ol>
-          <div class="row">${rankable.filter((p) => !draft.includes(p.id)).map((p) => `<button class="sm" data-act="rank-add" data-id="${p.id}" ${draft.length >= c.rank_count ? 'disabled' : ''}>${esc(p.display_name)}${p.is_po ? ' (PO)' : ''}</button>`).join('')}</div>
-          <div class="row" style="margin-top:10px"><button class="primary" data-act="save-ranks">Save ranking</button>
-          ${JSON.stringify(draft) !== JSON.stringify(s.my_rankings) ? '<span class="small muted">Unsaved changes</span>' : (s.my_rankings.length ? '<span class="small muted">Saved</span>' : '')}</div>
+        </div>` : ''}
+        ${rankingCard(cfg)}
+        ${mode === 'judge' ? `<div class="card"><h2>Finish</h2>
+          ${b.submitted_at ? '<p class="small">Submitted. Thank you!</p>' : `<p class="small muted">${unscored ? `${unscored} speech${unscored === 1 ? '' : 'es'} still unscored. ` : ''}Submitting locks your ballot.</p>
+            <button class="primary" data-act="submit-ballot">Submit ballot</button>`}
+          <h3>Share my ballot</h3>
+          ${publishSelect('data-publish="ballot"', b.publish)}
+          <p class="small muted">Each competitor sees only your points and comments on their own speeches. "Everyone" also shows all point totals and your ranking, but never other people's comments.</p>
+        </div>` : ''}
+      </div>
+    </div>`;
+}
+
+// ---------- Reflection (competitors) ----------
+function viewReflection() {
+  const r = ui.reflection, s = state;
+  if (!r) { api('GET', C('/reflection')).then((x) => { ui.reflection = x; render(); }).catch((e) => toast(e.message, true)); return '<p class="muted">Loading…</p>'; }
+  const name = (id) => competitor(id)?.display_name || '—';
+  const speech = (id) => s.speeches.find((x) => x.id === id);
+  const mine = r.practice;
+  const myPoints = new Map();
+  for (const x of mine.scores) { const e = myPoints.get(x.speaker_id) || []; e.push(x.points); myPoints.set(x.speaker_id, e); }
+  const avg = (a) => (a.length ? Math.round((a.reduce((x, y) => x + y, 0) / a.length) * 10) / 10 : null);
+  const allBallots = r.ballots.filter((b) => b.level === 'all');
+  const official = r.standings?.level === 'all' ? r.standings.rows : null;
+  const nothing = !r.ballots.length && !r.standings;
+  // Compare my practice ranking with the official order.
+  let agreement = '';
+  if (official && mine.ranking.length) {
+    const top = new Set(official.slice(0, r.rank_count).map((x) => x.id));
+    const hits = mine.ranking.filter((id) => top.has(id)).length;
+    agreement = `<p><strong>${hits} of your ${mine.ranking.length}</strong> ranked competitors finished in the official top ${r.rank_count}.</p>`;
+  }
+  return `
+    ${nothing ? '<div class="card"><p class="muted" style="margin:0">Nothing has been published yet. When a judge or your tournament admin shares results, they show up here next to your practice ballot.</p></div>' : ''}
+    <div class="grid two">
+      <div>
+        ${r.ballots.length ? `<div class="card"><h2>Feedback on your speeches</h2>
+          ${r.ballots.map((b) => `<h3>${esc(b.judge_name)}${b.my_rank ? ` <span class="pill">ranked you #${b.my_rank}</span>` : ''}</h3>
+            ${b.my_scores.length ? `<ul class="list">${b.my_scores.map((x) => { const sp = speech(x.speech_id); return `<li><div class="spread"><span>${sp ? `<span class="pill ${sp.side}">${SIDE_LABEL[sp.side]}</span> ${esc(sp.legislation_title)}` : 'Speech'}</span><strong>${x.points} pts</strong></div>${x.comment ? `<div class="small">${esc(x.comment)}</div>` : ''}</li>`; }).join('')}</ul>` : '<p class="small muted">No speech scores from this judge.</p>'}
+            ${b.my_po_score ? `<p class="small"><strong>Presiding:</strong> ${b.my_po_score.points} pts${b.my_po_score.comment ? ` · ${esc(b.my_po_score.comment)}` : ''}</p>` : ''}`).join('')}
+        </div>` : ''}
+        ${r.standings ? `<div class="card"><h2>${r.standings.level === 'all' ? 'Standings' : 'Your result'}</h2>
+          <div class="table-wrap"><table><tr><th>Place</th><th>Name</th><th>Points</th><th>Rank sum</th></tr>
+          ${r.standings.rows.map((x) => `<tr class="${x.id === s.me.id ? 'me' : ''}"><td>${x.place}${r.standings.level === 'individual' ? ` of ${r.standings.of}` : ''}</td><td>${esc(x.name)}${x.was_po ? ' <span class="pill">PO</span>' : ''}</td><td>${x.total_points}</td><td>${x.rank_total}</td></tr>`).join('')}
+          </table></div></div>` : ''}
+      </div>
+      <div>
+        <div class="card"><h2>Your practice ballot</h2>
+          ${agreement}
+          ${mine.ranking.length ? `<h3>Your ranking</h3><ol>${mine.ranking.map((id) => {
+            const off = official?.find((x) => x.id === id);
+            return `<li>${esc(name(id))}${off ? ` <span class="small muted">· official place ${off.place}</span>` : ''}</li>`; }).join('')}</ol>` : '<p class="small muted">You have not saved a practice ranking.</p>'}
+          ${myPoints.size ? `<h3>Your points by competitor</h3><div class="table-wrap"><table><tr><th>Competitor</th><th>Your avg</th>${allBallots.map((b) => `<th>${esc(b.judge_name)} total</th>`).join('')}</tr>
+            ${[...myPoints.entries()].map(([id, pts]) => `<tr><td>${esc(name(id))}</td><td>${avg(pts)} <span class="small muted">(${pts.length})</span></td>${allBallots.map((b) => `<td>${b.totals.find((t) => t.id === id)?.points ?? '—'}</td>`).join('')}</tr>`).join('')}
+            </table></div>` : '<p class="small muted">Score speeches on the Practice ballot tab to compare later.</p>'}
+          ${allBallots.map((b) => b.ranking?.length ? `<h3>${esc(b.judge_name)}'s ranking</h3><ol>${b.ranking.map((x) => `<li>${esc(x.name)}${mine.ranking.includes(x.id) ? ' <span class="pill passed">you ranked them too</span>' : ''}</li>`).join('')}</ol>` : '').join('')}
         </div>
       </div>
     </div>`;
@@ -809,7 +936,14 @@ function viewResults() {
     ${r.rows.map((x) => `<tr><td>${x.place}</td><td>${esc(x.name)}${x.was_po ? ' <span class="pill">PO</span>' : ''}<div class="small muted">${esc(x.school)}</div></td><td>${x.speeches}</td><td>${x.total_points}</td><td>${x.average_points ?? '—'}</td><td>${x.rank_total}</td>
       ${x.by_judge.map((b) => `<td>${b.rank ? `#${b.rank}` : '—'}<div class="small muted">${b.points} pts</div></td>`).join('')}</tr>`).join('')}
     </table></div></div>
-    <div class="card"><h2>Judge progress</h2><ul class="list">${r.progress.map((p) => `<li class="spread"><span>${esc(p.name)}</span><span class="small">${p.scored}/${r.total_speeches} speeches · PO ${p.po_scored ? '✓' : '—'} · ranked ${p.ranked}</span></li>`).join('') || '<li class="muted">No judges assigned.</li>'}</ul>
+    <div class="card"><h2>Publish standings</h2>
+      ${publishSelect('data-publish="standings" style="max-width:420px"', r.standings_publish)}
+      <p class="small muted">"Each competitor" shows students only their own place and totals. "Everyone" shows the whole table above without the per-judge columns. Judge comments are never shown to anyone but the competitor they were written for.</p></div>
+    <div class="card"><h2>Judges</h2><div class="table-wrap"><table><tr><th>Judge</th><th>Progress</th><th>Ballot</th><th>Shared with</th></tr>
+      ${r.progress.map((p) => `<tr><td>${esc(p.name)}</td><td class="small">${p.scored}/${r.total_speeches} speeches · PO ${p.po_scored ? '✓' : '—'} · ranked ${p.ranked}</td>
+        <td class="small">${p.submitted_at ? `Submitted ${fmtTime(p.submitted_at)} <button class="sm ghost" data-act="reopen-ballot" data-id="${p.judge_id}" data-name="${esc(p.name)}">Reopen</button>` : '<span class="muted">Not submitted</span>'}</td>
+        <td>${publishSelect(`data-publish="ballot" data-judge="${p.judge_id}"`, p.publish)}</td></tr>`).join('') || '<tr><td class="muted">No judges assigned.</td></tr>'}
+    </table></div>
     <button class="sm" data-act="refresh-results">Refresh</button></div>`;
 }
 
@@ -860,15 +994,34 @@ document.addEventListener('change', async (e) => {
   const el = e.target;
   if (el.matches('[data-viewas]')) {
     ui.viewAs = el.value ? Number(el.value) : null;
-    ui.rankDraft = null; ui.results = null;
+    ui.rankDraft = null; ui.results = null; ui.reflection = null;
     el.blur();
     await loadState();
     return;
   }
+  if (el.matches('[data-publish]')) {
+    el.blur();
+    const body = el.dataset.publish === 'standings' ? { target: 'standings', level: el.value }
+      : { target: 'ballot', level: el.value, judge_id: el.dataset.judge ? Number(el.dataset.judge) : undefined };
+    await act('POST', C('/publish'), body, el.value === 'private' ? 'Now private' : 'Published');
+    if (currentTab() === 'results') { ui.results = null; render(); }
+    return;
+  }
+  if (el.dataset.gridSpeech) {
+    const cfg = ballotCfg(el.dataset.mode), id = Number(el.dataset.gridSpeech);
+    el.blur();
+    await act('PUT', cfg.scorePath(id), el.value ? { points: Number(el.value), comment: cfg.scores[id]?.comment || '' } : { points: null }, 'Saved');
+    return;
+  }
+  if (el.dataset.gridPo) {
+    el.blur();
+    if (el.value) await act('PUT', C('/po-score'), { po_user_id: Number(el.dataset.gridPo), points: Number(el.value), comment: state.my_po_scores.find((x) => x.po_user_id === Number(el.dataset.gridPo))?.comment || '' }, 'Saved');
+    return;
+  }
   if (el.dataset.commentFor) {
-    const id = Number(el.dataset.commentFor), sc = state.my_scores[id];
+    const cfg = ballotCfg(el.dataset.mode), id = Number(el.dataset.commentFor), sc = cfg.scores[id];
     if (!sc) { toast('Pick points first, then your comment is saved with them.', true); return; }
-    await act('PUT', C(`/scores/${id}`), { points: sc.points, comment: el.value }, 'Comment saved');
+    await act('PUT', cfg.scorePath(id), { points: sc.points, comment: el.value }, 'Comment saved');
   } else if (el.dataset.poCommentFor) {
     const id = Number(el.dataset.poCommentFor), sc = state.my_po_scores.find((x) => x.po_user_id === id);
     if (!sc) { toast('Pick points first, then your comment is saved with them.', true); return; }
@@ -949,22 +1102,55 @@ document.addEventListener('click', async (e) => {
     }
     case 'delete-leg': if (confirm('Delete this legislation?')) await act('DELETE', C(`/legislation/${d.id}`), null, 'Deleted'); break;
     case 'score': {
-      const id = Number(d.id), points = Number(d.points);
+      const cfg = ballotCfg(d.mode), id = Number(d.id), points = Number(d.points);
       const comment = document.querySelector(`[data-comment-for="${id}"]`)?.value || '';
-      const same = s.my_scores[id]?.points === points;
-      await act('PUT', C(`/scores/${id}`), same ? { points: null } : { points, comment }, same ? 'Score cleared' : 'Saved');
+      const same = cfg.scores[id]?.points === points;
+      await act('PUT', cfg.scorePath(id), same ? { points: null } : { points, comment }, same ? 'Score cleared' : 'Saved');
       break;
     }
+    case 'chip': {
+      const cfg = ballotCfg(d.mode), id = Number(d.id);
+      const ta = document.querySelector(`[data-comment-for="${id}"]`);
+      let text = ta.value;
+      const re = new RegExp(`(^|\\s)${d.chip}\\.?(?=\\s|$)`);
+      text = re.test(text) ? text.replace(re, '').replace(/\s{2,}/g, ' ').trim() : `${text.trim()} ${d.chip}.`.trim();
+      ta.value = text;
+      const sc = cfg.scores[id];
+      if (sc) await act('PUT', cfg.scorePath(id), { points: sc.points, comment: text });
+      else { b.classList.toggle('on'); toast('Added. Pick points to save it.'); }
+      break;
+    }
+    case 'ballot-view': ui.ballotView = d.v; render(); break;
+    case 'rank-fill': ui.rankDraft = suggestedRanking(ballotCfg(s.me.isJudge ? 'judge' : 'practice')); render(); break;
+    case 'submit-ballot': {
+      const cfg = ballotCfg('judge'), unsaved = JSON.stringify(ui.rankDraft ?? suggestedRanking(cfg)) !== JSON.stringify(cfg.saved);
+      if (unsaved) { toast('Save your ranking first.', true); break; }
+      if (confirm('Submit your ballot? You will not be able to change scores afterwards unless an admin reopens it.')) await act('POST', C('/ballot/submit'), null, 'Ballot submitted');
+      break;
+    }
+    case 'reopen-ballot': if (confirm(`Reopen ${d.name}'s ballot so they can make changes?`)) { await act('POST', C(`/ballots/${d.id}/reopen`), null, 'Reopened'); ui.results = null; render(); } break;
     case 'po-score': {
       const id = Number(d.id);
       const comment = document.querySelector(`[data-po-comment-for="${id}"]`)?.value || '';
       await act('PUT', C('/po-score'), { po_user_id: id, points: Number(d.points), comment }, 'Saved');
       break;
     }
-    case 'rank-add': ui.rankDraft = [...(ui.rankDraft || []), Number(d.id)]; render(); break;
-    case 'rank-remove': ui.rankDraft.splice(Number(d.i), 1); render(); break;
-    case 'rank-up': { const i = Number(d.i); [ui.rankDraft[i - 1], ui.rankDraft[i]] = [ui.rankDraft[i], ui.rankDraft[i - 1]]; render(); break; }
-    case 'save-ranks': if (await act('PUT', C('/rankings'), { user_ids: ui.rankDraft }, 'Ranking saved')) ui.rankDraft = [...state.my_rankings]; render(); break;
+    case 'rank-add': case 'rank-remove': case 'rank-up': {
+      const cfg = ballotCfg(s.me.isJudge ? 'judge' : 'practice');
+      ui.rankDraft = [...(ui.rankDraft ?? suggestedRanking(cfg))];
+      const i = Number(d.i);
+      if (d.act === 'rank-add') ui.rankDraft.push(Number(d.id));
+      else if (d.act === 'rank-remove') ui.rankDraft.splice(i, 1);
+      else [ui.rankDraft[i - 1], ui.rankDraft[i]] = [ui.rankDraft[i], ui.rankDraft[i - 1]];
+      render();
+      break;
+    }
+    case 'save-ranks': {
+      const cfg = ballotCfg(d.mode), ids = ui.rankDraft ?? suggestedRanking(cfg);
+      if (await act('PUT', cfg.rankPath, { user_ids: ids }, 'Ranking saved')) ui.rankDraft = [...ballotCfg(d.mode).saved];
+      render();
+      break;
+    }
     case 'refresh-results': ui.results = null; render(); break;
   }
 });

@@ -19,6 +19,12 @@ The **Dashboard** tab (presiding officer or admin) is built for a laptop at the 
 
 Any signed-in person can open **My trackers** from the home page and run the same dashboard privately, for any chamber, even at tournaments that don't use this app. Type in the people in the room, set what's on the floor, and track speeches, questions, precedence, recency and the timer. Trackers are saved to that person's account and nobody else can see them.
 
+## Scoring, practice ballots and publishing
+
+- **Judges**: the speech being given pops to the top of the Score tab. Tap points, tap comment chips (Clash, Evidence, Refutation, …), and type a note only if wanted. A **Grid** view shows every competitor's speeches in one table. The final ranking is pre-filled from the judge's points, then adjusted and saved. **Submit ballot** locks it; an admin can reopen it from Results.
+- **Competitors**: a **Practice ballot** tab with the same scoring screen (never counted, private, can't score yourself), and a **Reflection** tab that puts their practice scores and ranking next to whatever has been published.
+- **Publishing**: a judge can share their own ballot, and an admin can share any judge's ballot or the combined standings, at one of three levels: *Private* (default), *Each competitor* (students see only the points and comments on their own speeches, or their own place), or *Everyone* (all point totals and rankings; comments are still only seen by the competitor they were written for).
+
 ## Mock tournament
 
 Admins can click **Create a mock tournament for testing** on the home page. It builds a practice chamber with 12 made-up competitors (one already the PO), 2 judges and 4 bills. A **View as** menu at the top lets the admin see and act as any of those people (vote, rise, score) from one laptop. **Setup → Delete this mock tournament** removes it and its made-up people. Made-up people never appear in the real people list.

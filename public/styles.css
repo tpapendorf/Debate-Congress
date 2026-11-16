@@ -101,3 +101,13 @@ button.next { outline: 3px solid var(--warn); outline-offset: 1px; }
 .seg button.on { background: var(--accent); color: #fff; outline: 0; }
 .warn-text { color: var(--warn); font-weight: 600; }
 .viewas { background: color-mix(in srgb, var(--warn) 12%, var(--card)); border-color: var(--warn); }
+
+/* Ballots */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chip { min-height: 30px; padding: 3px 10px; font-size: 13px; border-radius: 99px; }
+.chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.card.now { border: 2px solid var(--warn); }
+.banner.submitted { background: var(--aff); color: #fff; margin-top: 12px; }
+.grid-ballot select { min-width: 64px; min-height: 36px; padding: 4px 6px; }
+.grid-ballot td.missing select { border-color: var(--warn); }
+tr.me td { background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 600; }
