@@ -25,6 +25,15 @@ Any signed-in person can open **My trackers** from the home page and run the sam
 - **Competitors**: a **Practice ballot** tab with the same scoring screen (never counted, private, can't score yourself), and a **Reflection** tab that puts their practice scores and ranking next to whatever has been published.
 - **Publishing**: a judge can share their own ballot, and an admin can share any judge's ballot or the combined standings, at one of three levels: *Private* (default), *Each competitor* (students see only the points and comments on their own speeches, or their own place), or *Everyone* (all point totals and rankings; comments are still only seen by the competitor they were written for).
 
+## Teams and prep
+
+Open **Teams** in the top bar.
+
+- **Joining**: anyone can start a team and becomes its coach. Coaches and captains see a join code and a sign-up link. New people create their own account with the code (or existing users enter it under Teams), then wait for a coach or captain to approve them. Coaches set roles (coach, captain, competitor); a new code stops the old one working.
+- **Research** (shared, whole team edits): one page per bill or resolution with affirmative arguments, negative arguments, evidence with citations (author, source, date, link, which side it supports), and likely questions with suggested answers. Bills can be typed in or imported from a docket in a chamber you belong to.
+- **My prep** (private): speech plans tied to a bill and side, with status (idea, drafting, ready, delivered), an outline, and a panel of the team's research with **Insert** buttons that drop the argument and citation into the outline. A plan can be shared with coaches and captains. Private notes, optionally tied to a bill.
+- **Progress**: speeches given in this app, judge feedback that was published to the student, a hand-kept results log for other tournaments, and goals set by coaches. Coaches and captains get a team overview.
+
 ## Mock tournament
 
 Admins can click **Create a mock tournament for testing** on the home page. It builds a practice chamber with 12 made-up competitors (one already the PO), 2 judges and 4 bills. A **View as** menu at the top lets the admin see and act as any of those people (vote, rise, score) from one laptop. **Setup → Delete this mock tournament** removes it and its made-up people. Made-up people never appear in the real people list.
