@@ -134,3 +134,15 @@ tr.me td { background: color-mix(in srgb, var(--accent) 12%, transparent); font-
 .link-icon { font-size: 18px; flex: none; }
 .works-cited { padding-left: 20px; margin: 0; font-size: 14px; }
 .works-cited li { margin-bottom: 6px; word-break: break-word; }
+
+/* tracking the floor yourself */
+.trackbar { margin-top: 12px; border-top: 4px solid var(--accent); }
+.track-grid { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 16px; margin-top: 10px; }
+@media (max-width: 760px) { .track-grid { grid-template-columns: 1fr; } .track-timer { order: -1; } }
+.track-timer { text-align: center; border: 1px solid var(--line); border-radius: 10px; padding: 10px; align-self: start; }
+.track-timer .timer { font-size: 56px; }
+.name-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.name-buttons button { min-height: 44px; }
+.name-buttons .count { display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--line); color: var(--ink); font-size: 12px; margin-left: 4px; }
+.name-buttons button.primary .count { background: rgba(255,255,255,.25); color: #fff; }
+.log-fix { margin-top: 6px; }

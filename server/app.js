@@ -276,10 +276,14 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
       }
       next.po_user_id = po;
     }
+    if (b.floor_mode !== undefined) {
+      if (!['po', 'self'].includes(b.floor_mode)) throw bad('Pick who runs the floor.');
+      next.floor_mode = b.floor_mode;
+    }
     q(`UPDATE chambers SET name=?, score_min=?, score_max=?, rank_count=?, speech_seconds=?,
-       authorship_question_seconds=?, question_seconds=?, po_user_id=? WHERE id=?`)
+       authorship_question_seconds=?, question_seconds=?, po_user_id=?, floor_mode=? WHERE id=?`)
       .run(next.name, next.score_min, next.score_max, next.rank_count, next.speech_seconds,
-        next.authorship_question_seconds, next.question_seconds, next.po_user_id, c.id);
+        next.authorship_question_seconds, next.question_seconds, next.po_user_id, next.floor_mode, c.id);
     return done(c);
   }));
 
@@ -453,10 +457,11 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
   app.delete('/api/chambers/:id/speeches/:sid', wrap((req) => {
     const { c } = loadChamber(req, 'chair');
     const sid = Number(req.params.sid);
+    if (!q('SELECT 1 FROM speeches WHERE id = ? AND chamber_id = ? AND logged_by IS NULL').get(sid, c.id)) throw notFound('Speech not found.');
     if (q('SELECT 1 FROM speech_scores WHERE speech_id = ?').get(sid)) throw bad('A judge already scored this speech, so it cannot be removed.');
     tx(() => {
       if (c.current_speech_id === sid) closeCurrentSpeech(c);
-      q('DELETE FROM speeches WHERE id = ? AND chamber_id = ?').run(sid, c.id);
+      q('DELETE FROM speeches WHERE id = ? AND chamber_id = ? AND logged_by IS NULL').run(sid, c.id);
       resetQueue(c, 'speak');
       resetQueue(c, 'question');
     });
@@ -688,7 +693,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
   app.put('/api/chambers/:id/scores/:sid', wrap((req) => {
     const { c, user } = loadChamber(req, 'judge');
     assertOpen(c, user.id);
-    const s = q('SELECT id FROM speeches WHERE id = ? AND chamber_id = ?').get(Number(req.params.sid), c.id);
+    const s = q('SELECT id FROM speeches WHERE id = ? AND chamber_id = ? AND (logged_by IS NULL OR logged_by = ?)').get(Number(req.params.sid), c.id, user.id);
     if (!s) throw notFound('Speech not found.');
     const b = req.body || {};
     if (b.points === null || b.points === '') {
@@ -757,10 +762,55 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     return done(c);
   }));
 
+  // ---------- my own speech log (chambers with no PO running the floor in the app) ----------
+  function loadLogger(req) {
+    const r = loadChamber(req);
+    if (!r.m.isJudge && !r.m.isCompetitor) throw forbidden('Only judges and competitors in this chamber keep a speech log.');
+    if (r.m.isJudge && req.method !== 'GET') assertOpen(r.c, r.user.id);
+    return r;
+  }
+  function logFields(c, b, existing = {}) {
+    const out = {};
+    const has = (k) => b[k] !== undefined;
+    out.speaker_id = has('speaker_id') ? Number(b.speaker_id) : existing.speaker_id;
+    if (!q(`SELECT 1 FROM chamber_members m JOIN users u ON u.id = m.user_id WHERE m.chamber_id = ? AND u.id = ? AND u.role = 'competitor'`).get(c.id, out.speaker_id)) throw bad('Pick a competitor in this chamber.');
+    out.side = has('side') ? b.side : existing.side;
+    if (!SIDES.includes(out.side)) throw bad('Pick a side.');
+    out.legislation_id = has('legislation_id') ? (b.legislation_id ? Number(b.legislation_id) : null) : (existing.legislation_id ?? null);
+    if (out.legislation_id && !q('SELECT 1 FROM legislation WHERE id = ? AND chamber_id = ?').get(out.legislation_id, c.id)) throw bad('That bill is not on this docket.');
+    out.topic = has('topic') ? String(b.topic || '').trim().slice(0, 200) : (existing.topic || '');
+    if (out.legislation_id) out.topic = '';
+    out.duration_seconds = has('duration_seconds') ? (b.duration_seconds === null ? null : Math.max(0, Math.min(3600, Math.round(Number(b.duration_seconds) || 0)))) : (existing.duration_seconds ?? null);
+    return out;
+  }
+  app.post('/api/chambers/:id/my-log', wrap((req) => {
+    const { c, user } = loadLogger(req);
+    if (c.floor_mode !== 'self') throw bad('The presiding officer runs the floor in this chamber. An admin can switch it to "Each person tracks for themselves" in Setup.');
+    const f = logFields(c, req.body || {});
+    const r = q('INSERT INTO speeches (chamber_id, legislation_id, topic, speaker_id, side, recognized_at, duration_seconds, logged_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(c.id, f.legislation_id, f.topic, f.speaker_id, f.side, Date.now(), f.duration_seconds, user.id);
+    return { ok: true, speech_id: Number(r.lastInsertRowid) };
+  }));
+  app.put('/api/chambers/:id/my-log/:sid', wrap((req) => {
+    const { c, user } = loadLogger(req);
+    const s = q('SELECT * FROM speeches WHERE id = ? AND chamber_id = ? AND logged_by = ?').get(Number(req.params.sid), c.id, user.id);
+    if (!s) throw notFound('Speech not found.');
+    const f = logFields(c, req.body || {}, s);
+    q('UPDATE speeches SET legislation_id = ?, topic = ?, speaker_id = ?, side = ?, duration_seconds = ? WHERE id = ?')
+      .run(f.legislation_id, f.topic, f.speaker_id, f.side, f.duration_seconds, s.id);
+    if (f.speaker_id === user.id) q('DELETE FROM practice_scores WHERE speech_id = ? AND user_id = ?').run(s.id, user.id);
+    return { ok: true };
+  }));
+  app.delete('/api/chambers/:id/my-log/:sid', wrap((req) => {
+    const { c, user } = loadLogger(req);
+    q('DELETE FROM speeches WHERE id = ? AND chamber_id = ? AND logged_by = ?').run(Number(req.params.sid), c.id, user.id);
+    return { ok: true };
+  }));
+
   // ---------- practice ballots (competitors score for reflection; never counted) ----------
   app.put('/api/chambers/:id/practice/scores/:sid', wrap((req) => {
     const { c, user } = loadChamber(req, 'competitor');
-    const s = q('SELECT id, speaker_id FROM speeches WHERE id = ? AND chamber_id = ?').get(Number(req.params.sid), c.id);
+    const s = q('SELECT id, speaker_id FROM speeches WHERE id = ? AND chamber_id = ? AND (logged_by IS NULL OR logged_by = ?)').get(Number(req.params.sid), c.id, user.id);
     if (!s) throw notFound('Speech not found.');
     if (s.speaker_id === user.id) throw bad('You cannot score your own speech.');
     const b = req.body || {};
@@ -832,7 +882,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
   function competitorsWithStats(c) {
     const rows = q(`SELECT u.id, u.display_name, u.school, m.seat, m.speak_pos, m.question_pos FROM chamber_members m JOIN users u ON u.id = m.user_id
                     WHERE m.chamber_id = ? AND u.role = 'competitor' ORDER BY m.seat, u.display_name`).all(c.id);
-    const sp = new Map(q(`SELECT speaker_id, COUNT(*) n, MAX(recognized_at) last FROM speeches WHERE chamber_id = ? GROUP BY speaker_id`).all(c.id).map((r) => [r.speaker_id, r]));
+    const sp = new Map(q(`SELECT speaker_id, COUNT(*) n, MAX(recognized_at) last FROM speeches WHERE chamber_id = ? AND logged_by IS NULL GROUP BY speaker_id`).all(c.id).map((r) => [r.speaker_id, r]));
     const qs = new Map(q(`SELECT questioner_id, COUNT(*) n, MAX(asked_at) last FROM questions WHERE chamber_id = ? GROUP BY questioner_id`).all(c.id).map((r) => [r.questioner_id, r]));
     return rows.map((r) => ({
       ...r,
@@ -892,9 +942,12 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     const judges = q(`SELECT u.id, u.display_name, u.school FROM chamber_members m JOIN users u ON u.id = m.user_id
                       WHERE m.chamber_id = ? AND u.role = 'judge' ORDER BY u.display_name`).all(c.id);
     const legislation = q('SELECT * FROM legislation WHERE chamber_id = ? ORDER BY docket_order, id').all(c.id);
-    const speeches = q(`SELECT s.*, u.display_name speaker_name, l.title legislation_title FROM speeches s
-                        JOIN users u ON u.id = s.speaker_id JOIN legislation l ON l.id = s.legislation_id
-                        WHERE s.chamber_id = ? ORDER BY s.recognized_at`).all(c.id);
+    // Everyone sees the official record; a speech someone logged for themselves is only theirs.
+    const speechRows = q(`SELECT s.*, u.display_name speaker_name, COALESCE(l.title, NULLIF(s.topic, ''), 'No bill picked') legislation_title FROM speeches s
+                        JOIN users u ON u.id = s.speaker_id LEFT JOIN legislation l ON l.id = s.legislation_id
+                        WHERE s.chamber_id = ? AND (s.logged_by IS NULL OR s.logged_by = ?) ORDER BY s.recognized_at`).all(c.id, user.id);
+    const speeches = speechRows.filter((x) => x.logged_by == null);
+    const my_log = speechRows.filter((x) => x.logged_by != null).map((x) => ({ ...x, mine: true }));
     const questions = q(`SELECT q.id, q.speech_id, q.questioner_id, q.asked_at FROM questions q WHERE q.chamber_id = ? ORDER BY q.asked_at`).all(c.id)
       .map((x) => ({ ...x, questioner_name: nameOf.get(x.questioner_id) }));
     const requests = q('SELECT user_id, kind, requested_at FROM speech_requests WHERE chamber_id = ? ORDER BY requested_at').all(c.id)
@@ -941,6 +994,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
           started_at: c.timer_started_at, elapsed_ms: c.timer_elapsed_ms,
         },
         next_side,
+        floor_mode: c.floor_mode,
       },
       competitors: comps,
       judges,
@@ -953,7 +1007,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
         ? q(`SELECT id, display_name, role FROM users WHERE mock_chamber_id = ? ORDER BY role DESC, display_name`).all(c.id)
           .map((u) => ({ ...u, is_po: u.id === c.po_user_id }))
         : null,
-      legislation, speeches, questions, requests, motions, announcements, open_vote, past_votes,
+      legislation, speeches, my_log, questions, requests, motions, announcements, open_vote, past_votes,
       motion_kinds: Object.entries(MOTIONS).map(([k, v]) => ({ kind: k, ...v })),
     };
     if (m.isJudge) {
@@ -984,6 +1038,10 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     const po = q('SELECT judge_id, po_user_id, points FROM po_scores WHERE chamber_id = ?').all(c.id);
     const ranks = q('SELECT judge_id, user_id, rank FROM rankings WHERE chamber_id = ?').all(c.id);
     const unranked = c.rank_count + 1;
+    // Without a PO in the app there is no official record, so count speeches from the judges' own logs.
+    const logged = new Map();
+    for (const r of q(`SELECT speaker_id, logged_by, COUNT(*) n FROM speeches s JOIN users u ON u.id = s.logged_by
+                       WHERE s.chamber_id = ? AND u.role = 'judge' GROUP BY speaker_id, logged_by`).all(c.id)) logged.set(r.speaker_id, Math.max(logged.get(r.speaker_id) || 0, r.n));
     const rows = comps.map((p) => {
       const mine = scores.filter((s) => s.speaker_id === p.id);
       const poMine = po.filter((s) => s.po_user_id === p.id);
@@ -997,7 +1055,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
       const rank_total = judgesWhoRanked.reduce((a, j) => a + (by_judge.find((b) => b.judge_id === j.id).rank ?? unranked), 0);
       return {
         id: p.id, name: p.display_name, school: p.school, was_po: poMine.length > 0 || p.is_po,
-        speeches: p.speeches, questions: p.questions,
+        speeches: p.speeches || logged.get(p.id) || 0, questions: p.questions,
         total_points: total, average_points: all.length ? Math.round((total / all.length) * 100) / 100 : null,
         rank_total, by_judge,
       };
@@ -1011,7 +1069,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
       ranked: ranks.filter((r) => r.judge_id === j.id).length,
       po_scored: po.some((s) => s.judge_id === j.id),
     }));
-    return { judges, rows, progress, standings_publish: c.standings_publish, total_speeches: q('SELECT COUNT(*) n FROM speeches WHERE chamber_id = ?').get(c.id).n, unranked_value: unranked };
+    return { judges, rows, progress, standings_publish: c.standings_publish, total_speeches: q('SELECT COUNT(*) n FROM speeches WHERE chamber_id = ? AND logged_by IS NULL').get(c.id).n, unranked_value: unranked };
   }
   app.get('/api/chambers/:id/results', wrap((req) => {
     const { c } = loadChamber(req, 'admin');

@@ -63,12 +63,14 @@ function open(file = DB_PATH) {
     CREATE TABLE IF NOT EXISTS speeches (
       id INTEGER PRIMARY KEY,
       chamber_id INTEGER NOT NULL REFERENCES chambers(id) ON DELETE CASCADE,
-      legislation_id INTEGER NOT NULL REFERENCES legislation(id) ON DELETE CASCADE,
+      legislation_id INTEGER REFERENCES legislation(id) ON DELETE CASCADE,
       speaker_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       side TEXT NOT NULL CHECK (side IN ('authorship','sponsorship','aff','neg')),
       recognized_at INTEGER NOT NULL,
       ended_at INTEGER,
-      duration_seconds INTEGER
+      duration_seconds INTEGER,
+      logged_by INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      topic TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS questions (
       id INTEGER PRIMARY KEY,
@@ -187,6 +189,34 @@ function migrate(db) {
   add('chambers', 'is_mock', 'INTEGER NOT NULL DEFAULT 0');
   add('users', 'mock_chamber_id', 'INTEGER');       // set for made-up people in a mock tournament
   add('chambers', 'standings_publish', "TEXT NOT NULL DEFAULT 'private'"); // private | individual | all
+  add('chambers', 'floor_mode', "TEXT NOT NULL DEFAULT 'po'");      // po | self (each judge/competitor logs speeches)
+  // Speeches a judge or competitor logs for themselves: logged_by is set, and the bill is optional.
+  const speechCols = db.prepare('PRAGMA table_info(speeches)').all();
+  if (!speechCols.some((r) => r.name === 'logged_by')) {
+    db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.exec(`BEGIN;
+        CREATE TABLE speeches_new (
+          id INTEGER PRIMARY KEY,
+          chamber_id INTEGER NOT NULL REFERENCES chambers(id) ON DELETE CASCADE,
+          legislation_id INTEGER REFERENCES legislation(id) ON DELETE CASCADE,
+          speaker_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          side TEXT NOT NULL CHECK (side IN ('authorship','sponsorship','aff','neg')),
+          recognized_at INTEGER NOT NULL,
+          ended_at INTEGER,
+          duration_seconds INTEGER,
+          logged_by INTEGER REFERENCES users(id) ON DELETE CASCADE,
+          topic TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO speeches_new (id, chamber_id, legislation_id, speaker_id, side, recognized_at, ended_at, duration_seconds)
+          SELECT id, chamber_id, legislation_id, speaker_id, side, recognized_at, ended_at, duration_seconds FROM speeches;
+        DROP TABLE speeches;
+        ALTER TABLE speeches_new RENAME TO speeches;
+        COMMIT;`);
+    } catch (e) { try { db.exec('ROLLBACK'); } catch {} throw e; }
+    finally { db.exec('PRAGMA foreign_keys = ON'); }
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS speeches_by_chamber ON speeches (chamber_id, logged_by)');
 }
 
 module.exports = { open, DB_PATH };

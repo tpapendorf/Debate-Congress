@@ -34,6 +34,15 @@ Open **Teams** in the top bar.
 - **My prep** (private): speech plans tied to a bill and side, with status (idea, drafting, ready, delivered), an outline, and a panel of the team's research with **Insert** buttons that drop the argument and citation into the outline. A plan can be shared with coaches and captains. Private notes, optionally tied to a bill.
 - **Progress**: speeches given in this app, judge feedback that was published to the student, a hand-kept results log for other tournaments, and goals set by coaches. Coaches and captains get a team overview.
 
+## Rounds without a PO in the app
+
+When the presiding officer isn't running the round in this app, an admin sets **Setup → Who runs the floor?** to *Each judge and competitor tracks for themselves*. Then:
+
+- The **Score** tab (judges) and **Practice ballot** tab (competitors) get a *Track the floor* bar: pick the bill (or type one that isn't on the docket), tap the name of whoever gets the floor, and their speech card opens ready to score. Names are ordered by precedence from your own log, and the side is guessed (authorship first, then aff/neg alternating).
+- The timer runs on your own device: Pause/Start (space bar on a laptop), Questioning (longer after authorship), End speech. Speech length is saved with the entry.
+- Each person's log is private. Two judges in the same room keep separate logs and never see each other's. A wrong entry can be fixed or removed until the ballot is submitted.
+- Rankings, submitting, publishing and results work the same. Results count speeches from the judges' logs.
+
 ## Citations and linked docs
 
 - **Fill in from link.** On any evidence card, paste the article link and press *Fill in from link*. The server reads the page's public details (author, title, publication, date) from the tags news sites and journals publish for this purpose. Check the result and fix anything it missed; some sites block lookups, and then you fill it in by hand.
