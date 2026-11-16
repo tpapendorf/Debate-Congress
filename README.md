@@ -34,6 +34,13 @@ Open **Teams** in the top bar.
 - **My prep** (private): speech plans tied to a bill and side, with status (idea, drafting, ready, delivered), an outline, and a panel of the team's research with **Insert** buttons that drop the argument and citation into the outline. A plan can be shared with coaches and captains. Private notes, optionally tied to a bill.
 - **Progress**: speeches given in this app, judge feedback that was published to the student, a hand-kept results log for other tournaments, and goals set by coaches. Coaches and captains get a team overview.
 
+## Citations and linked docs
+
+- **Fill in from link.** On any evidence card, paste the article link and press *Fill in from link*. The server reads the page's public details (author, title, publication, date) from the tags news sites and journals publish for this purpose. Check the result and fix anything it missed; some sites block lookups, and then you fill it in by hand.
+- **Copy citation** gives a full citation (Author. "Title." Publication, Date. Link). On a speech plan, any evidence you insert into the outline is listed under **Works cited**, with *Copy all*.
+- **Google Docs, Sheets, Slides and Drive folders** can be linked on the Research tab (whole team), on a bill page (that bill), or on a speech plan (just you, plus coaches and captains if you share the plan). The app only stores the link and recognises what kind of Google file it is. Opening it uses each person's own Google account, so share the file or folder with the team, or set it to "Anyone with the link".
+- Lookups only go to public web addresses on the normal ports, never to internal addresses, and give up after 8 seconds.
+
 ## Mock tournament
 
 Admins can click **Create a mock tournament for testing** on the home page. It builds a practice chamber with 12 made-up competitors (one already the PO), 2 judges and 4 bills. A **View as** menu at the top lets the admin see and act as any of those people (vote, rise, score) from one laptop. **Setup → Delete this mock tournament** removes it and its made-up people. Made-up people never appear in the real people list.

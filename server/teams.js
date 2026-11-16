@@ -84,6 +84,17 @@ function schema(db) {
       notes TEXT NOT NULL DEFAULT '',
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS team_links (
+      id INTEGER PRIMARY KEY,
+      team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      bill_id INTEGER REFERENCES team_bills(id) ON DELETE CASCADE,
+      plan_id INTEGER REFERENCES speech_plans(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      url TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'web',
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS team_goals (
       id INTEGER PRIMARY KEY,
       team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
@@ -94,10 +105,112 @@ function schema(db) {
       created_at INTEGER NOT NULL
     );
   `);
+  const cols = db.prepare('PRAGMA table_info(bill_items)').all().map((r) => r.name);
+  if (!cols.includes('cite_title')) db.exec(`ALTER TABLE bill_items ADD COLUMN cite_title TEXT NOT NULL DEFAULT ''`);
+}
+
+// What a link points at, from its address alone (we never need access to the Google file itself).
+function linkKind(url) {
+  let u;
+  try { u = new URL(url); } catch { return 'web'; }
+  const h = u.hostname.replace(/^www\./, ''), p = u.pathname;
+  if (h === 'docs.google.com') {
+    if (p.startsWith('/document')) return 'gdoc';
+    if (p.startsWith('/spreadsheets')) return 'gsheet';
+    if (p.startsWith('/presentation')) return 'gslides';
+    if (p.startsWith('/forms')) return 'gform';
+    return 'gdrive';
+  }
+  if (h === 'drive.google.com') return p.includes('/folders/') ? 'gfolder' : 'gdrive';
+  return 'web';
+}
+const KIND_TITLE = { gdoc: 'Google Doc', gsheet: 'Google Sheet', gslides: 'Google Slides', gform: 'Google Form', gfolder: 'Drive folder', gdrive: 'Google Drive file', web: 'Link' };
+
+// ---------- citation lookup: read an article's public metadata (title, author, site, date) ----------
+const dns = require('node:dns').promises;
+const net = require('node:net');
+function privateAddress(ip) {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split('.').map(Number);
+    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
+  }
+  const x = ip.toLowerCase();
+  if (x.startsWith('::ffff:')) return privateAddress(x.slice(7));
+  return x === '::1' || x === '::' || x.startsWith('fc') || x.startsWith('fd') || x.startsWith('fe8') || x.startsWith('fe9') || x.startsWith('fea') || x.startsWith('feb');
+}
+async function safeFetch(rawUrl, hops = 0) {
+  let u;
+  try { u = new URL(rawUrl); } catch { throw new Error('That does not look like a web address.'); }
+  if (!['http:', 'https:'].includes(u.protocol)) throw new Error('Only web links (http or https) can be looked up.');
+  if (u.port && !['80', '443'].includes(u.port)) throw new Error('That link uses an unusual port and cannot be looked up.');
+  const addrs = net.isIP(u.hostname) ? [{ address: u.hostname }] : await dns.lookup(u.hostname, { all: true }).catch(() => []);
+  if (!addrs.length) throw new Error('Could not find that website.');
+  if (addrs.some((a) => privateAddress(a.address))) throw new Error('That address is not on the public internet.');
+  const res = await fetch(u, { redirect: 'manual', signal: AbortSignal.timeout(8000), headers: { 'User-Agent': 'CongressChamber-CitationBot/1.0', Accept: 'text/html,application/xhtml+xml' } });
+  if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+    if (hops >= 4) throw new Error('Too many redirects.');
+    return safeFetch(new URL(res.headers.get('location'), u).href, hops + 1);
+  }
+  if (!res.ok) throw new Error(`The site answered with an error (${res.status}). Fill the citation in by hand.`);
+  if (!/html/i.test(res.headers.get('content-type') || '')) return { url: u.href, html: '' };
+  // Read at most ~1.5 MB.
+  const reader = res.body.getReader();
+  const chunks = []; let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value); size += value.length;
+    if (size > 1_500_000) { reader.cancel().catch(() => {}); break; }
+  }
+  return { url: u.href, html: Buffer.concat(chunks).toString('utf8') };
+}
+function decodeEntities(s) {
+  return s.replace(/&(#x?[0-9a-f]+|amp|lt|gt|quot|apos|nbsp|#39);/gi, (m, e) => {
+    const k = e.toLowerCase();
+    if (k === 'amp') return '&'; if (k === 'lt') return '<'; if (k === 'gt') return '>'; if (k === 'quot') return '"'; if (k === 'apos' || k === '#39') return "'"; if (k === 'nbsp') return ' ';
+    const n = k.startsWith('#x') ? parseInt(k.slice(2), 16) : parseInt(k.slice(1), 10);
+    return Number.isFinite(n) ? String.fromCodePoint(n) : m;
+  });
+}
+function parseCitation(html, url) {
+  const meta = {};
+  for (const tag of html.match(/<meta\b[^>]*>/gi) || []) {
+    const key = (tag.match(/\b(?:name|property|itemprop)\s*=\s*["']([^"']+)["']/i) || [])[1];
+    const val = (tag.match(/\bcontent\s*=\s*["']([^"']*)["']/i) || [])[1];
+    if (key && val != null) { const k = key.toLowerCase(); (meta[k] ||= []).push(decodeEntities(val).trim()); }
+  }
+  const first = (...keys) => { for (const k of keys) { const v = meta[k]?.find((x) => x); if (v) return v; } return ''; };
+  let ld = {};
+  for (const block of html.match(/<script[^>]+application\/ld\+json[^>]*>[\s\S]*?<\/script>/gi) || []) {
+    try {
+      const json = JSON.parse(block.replace(/^<script[^>]*>|<\/script>$/gi, ''));
+      const items = [].concat(json['@graph'] || json);
+      const art = items.find((x) => /Article|Report|BlogPosting|WebPage/i.test([].concat(x['@type'] || []).join(' ')));
+      if (art) { ld = art; break; }
+    } catch { /* ignore bad JSON-LD */ }
+  }
+  const ldAuthor = [].concat(ld.author || []).map((a) => (typeof a === 'string' ? a : a?.name)).filter(Boolean).join(', ');
+  const titleTag = decodeEntities(((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '').replace(/\s+/g, ' ').trim());
+  const authors = meta.citation_author?.length ? meta.citation_author.join(', ') : '';
+  const host = new URL(url).hostname.replace(/^www\./, '');
+  let author = authors || first('author', 'article:author', 'parsely-author', 'sailthru.author', 'dc.creator') || ldAuthor;
+  if (/^https?:\/\//.test(author)) author = ldAuthor;
+  const rawDate = first('citation_publication_date', 'citation_date', 'article:published_time', 'date', 'pubdate', 'publishdate', 'dc.date', 'parsely-pub-date') || ld.datePublished || '';
+  let date = rawDate;
+  const d = new Date(rawDate.replace(/\//g, '-'));
+  if (rawDate && !Number.isNaN(d.getTime())) date = d.toISOString().slice(0, 10);
+  return {
+    title: first('citation_title', 'og:title', 'twitter:title', 'dc.title') || ld.headline || titleTag,
+    author: author.slice(0, 200),
+    source: first('citation_journal_title', 'og:site_name', 'application-name') || ld.publisher?.name || host,
+    date, url,
+    description: first('description', 'og:description').slice(0, 400),
+  };
 }
 
 module.exports = function mountTeams(app, h) {
   const { db, q, tx, wrap, requireUser, bad, forbidden, notFound, hashPassword, startSession, makeUsername } = h;
+  const lookupCache = new Map();
   schema(db);
   const now = () => Date.now();
   const str = (v, max = 5000) => String(v ?? '').trim().slice(0, max);
@@ -201,7 +314,10 @@ module.exports = function mountTeams(app, h) {
                        (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'evidence') evidence,
                        (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'question') questions
                      FROM team_bills b WHERE b.team_id = ? ORDER BY b.updated_at DESC`).all(team.id);
+    const links = q(`SELECT l.*, u.display_name added_by FROM team_links l LEFT JOIN users u ON u.id = l.created_by
+                     WHERE l.team_id = ? AND l.bill_id IS NULL AND l.plan_id IS NULL ORDER BY l.created_at DESC`).all(team.id);
     return {
+      links,
       team: { id: team.id, name: team.name, school: team.school, join_code: isLeader ? team.join_code : null },
       me: { id: user.id, role, isLeader, isCoach: role === 'coach' },
       members, bills,
@@ -308,7 +424,9 @@ module.exports = function mountTeams(app, h) {
                      WHERE i.bill_id = ? ORDER BY i.section, i.id`).all(bill.id);
     const my_plans = q('SELECT id, title, side, status FROM speech_plans WHERE bill_id = ? AND user_id = ? ORDER BY updated_at DESC').all(bill.id, user.id);
     const my_notes = q('SELECT id, title FROM team_notes WHERE bill_id = ? AND user_id = ? ORDER BY updated_at DESC').all(bill.id, user.id);
-    return { bill, items, my_plans, my_notes };
+    const links = q(`SELECT l.*, u.display_name added_by FROM team_links l LEFT JOIN users u ON u.id = l.created_by
+                     WHERE l.bill_id = ? ORDER BY l.created_at DESC`).all(bill.id);
+    return { bill, items, my_plans, my_notes, links };
   }));
   app.put('/api/teams/:tid/bills/:bid', wrap((req) => {
     const { team } = loadTeam(req);
@@ -333,16 +451,16 @@ module.exports = function mountTeams(app, h) {
     const side = ['aff', 'neg', 'both'].includes(b.side) ? b.side : (existing.side || (section === 'aff' || section === 'neg' ? section : 'both'));
     let url = str(b.cite_url ?? existing.cite_url, 1000);
     if (url && !/^https?:\/\//i.test(url)) url = `https://${url}`;
-    return { section, side, text, detail: str(b.detail ?? existing.detail), cite_source: str(b.cite_source ?? existing.cite_source, 300),
+    return { section, side, text, detail: str(b.detail ?? existing.detail), cite_title: str(b.cite_title ?? existing.cite_title, 300), cite_source: str(b.cite_source ?? existing.cite_source, 300),
       cite_author: str(b.cite_author ?? existing.cite_author, 200), cite_date: str(b.cite_date ?? existing.cite_date, 50), cite_url: url };
   }
   app.post('/api/teams/:tid/bills/:bid/items', wrap((req) => {
     const { team, user } = loadTeam(req);
     const bill = getBill(team, req.params.bid);
     const f = itemFields(req.body || {});
-    const r = q(`INSERT INTO bill_items (bill_id, section, side, text, detail, cite_source, cite_author, cite_date, cite_url, created_by, updated_by, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(bill.id, f.section, f.side, f.text, f.detail, f.cite_source, f.cite_author, f.cite_date, f.cite_url, user.id, user.id, now());
+    const r = q(`INSERT INTO bill_items (bill_id, section, side, text, detail, cite_title, cite_source, cite_author, cite_date, cite_url, created_by, updated_by, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(bill.id, f.section, f.side, f.text, f.detail, f.cite_title, f.cite_source, f.cite_author, f.cite_date, f.cite_url, user.id, user.id, now());
     q('UPDATE team_bills SET updated_at = ? WHERE id = ?').run(now(), bill.id);
     return { id: Number(r.lastInsertRowid) };
   }));
@@ -352,8 +470,8 @@ module.exports = function mountTeams(app, h) {
     const it = q('SELECT * FROM bill_items WHERE id = ? AND bill_id = ?').get(Number(req.params.iid), bill.id);
     if (!it) throw notFound();
     const f = itemFields(req.body || {}, it);
-    q(`UPDATE bill_items SET section = ?, side = ?, text = ?, detail = ?, cite_source = ?, cite_author = ?, cite_date = ?, cite_url = ?, updated_by = ?, updated_at = ? WHERE id = ?`)
-      .run(f.section, f.side, f.text, f.detail, f.cite_source, f.cite_author, f.cite_date, f.cite_url, user.id, now(), it.id);
+    q(`UPDATE bill_items SET section = ?, side = ?, text = ?, detail = ?, cite_title = ?, cite_source = ?, cite_author = ?, cite_date = ?, cite_url = ?, updated_by = ?, updated_at = ? WHERE id = ?`)
+      .run(f.section, f.side, f.text, f.detail, f.cite_title, f.cite_source, f.cite_author, f.cite_date, f.cite_url, user.id, now(), it.id);
     return { ok: true };
   }));
   app.delete('/api/teams/:tid/bills/:bid/items/:iid', wrap((req) => {
@@ -402,7 +520,8 @@ module.exports = function mountTeams(app, h) {
     const { p, own } = getPlan(req, team, user, isLeader);
     const evidence = p.bill_id ? q(`SELECT * FROM bill_items WHERE bill_id = ? ORDER BY section, id`).all(p.bill_id) : [];
     const author = q('SELECT display_name FROM users WHERE id = ?').get(p.user_id)?.display_name;
-    return { plan: p, own, author, items: evidence };
+    const links = q('SELECT * FROM team_links WHERE plan_id = ? ORDER BY created_at DESC').all(p.id);
+    return { plan: p, own, author, items: evidence, links };
   }));
   app.put('/api/teams/:tid/plans/:pid', wrap((req) => {
     const { team, user, isLeader } = loadTeam(req);
@@ -439,6 +558,55 @@ module.exports = function mountTeams(app, h) {
   app.delete('/api/teams/:tid/notes/:nid', wrap((req) => {
     const { team, user } = loadTeam(req);
     q('DELETE FROM team_notes WHERE id = ? AND team_id = ? AND user_id = ?').run(Number(req.params.nid), team.id, user.id);
+    return { ok: true };
+  }));
+
+  // ---------- citations from a link ----------
+  app.get('/api/teams/:tid/cite', async (req, res) => {
+    try {
+      loadTeam(req);
+      const url = str(req.query.url, 2000);
+      if (!url) return res.status(400).json({ error: 'Paste a link first.' });
+      const full = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+      const kind = linkKind(full);
+      if (kind !== 'web') return res.json({ title: '', author: '', source: KIND_TITLE[kind], date: '', url: full, kind, note: 'Google files are private, so fill in the title yourself.' });
+      if (lookupCache.has(full)) return res.json(lookupCache.get(full));
+      const page = await safeFetch(full);
+      const out = { ...parseCitation(page.html, page.url), kind };
+      if (lookupCache.size > 500) lookupCache.clear();
+      lookupCache.set(full, out);
+      res.json(out);
+    } catch (e) {
+      res.status(e.status || 400).json({ error: e.status ? e.message : `Could not read that page: ${e.name === 'TimeoutError' ? 'it took too long' : e.message.replace(/\.$/, '')}. You can fill the citation in by hand.` });
+    }
+  });
+
+  // ---------- linked docs and folders (Google Drive or any web link) ----------
+  app.post('/api/teams/:tid/links', wrap((req) => {
+    const { team, user } = loadTeam(req);
+    const b = req.body || {};
+    let url = str(b.url, 2000);
+    if (!url) throw bad('Paste a link.');
+    if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+    try { new URL(url); } catch { throw bad('That does not look like a web address.'); }
+    let billId = null, planId = null;
+    if (b.plan_id) {
+      const p = q('SELECT * FROM speech_plans WHERE id = ? AND team_id = ? AND user_id = ?').get(Number(b.plan_id), team.id, user.id);
+      if (!p) throw notFound('Speech plan not found.');
+      planId = p.id;
+    } else if (b.bill_id) billId = getBill(team, b.bill_id).id;
+    const kind = linkKind(url);
+    const title = str(b.title, 200) || KIND_TITLE[kind];
+    const r = q('INSERT INTO team_links (team_id, bill_id, plan_id, title, url, kind, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(team.id, billId, planId, title, url, kind, user.id, now());
+    return { id: Number(r.lastInsertRowid), kind };
+  }));
+  app.delete('/api/teams/:tid/links/:lid', wrap((req) => {
+    const { team, user, isLeader } = loadTeam(req);
+    const l = q('SELECT * FROM team_links WHERE id = ? AND team_id = ?').get(Number(req.params.lid), team.id);
+    if (!l) throw notFound();
+    if (l.plan_id ? l.created_by !== user.id : (l.created_by !== user.id && !isLeader)) throw forbidden('Only the person who added it, or a coach or captain, can remove it.');
+    q('DELETE FROM team_links WHERE id = ?').run(l.id);
     return { ok: true };
   }));
 
@@ -526,3 +694,7 @@ module.exports = function mountTeams(app, h) {
     return { ok: true };
   }));
 };
+
+module.exports.parseCitation = parseCitation;
+module.exports.linkKind = linkKind;
+module.exports.privateAddress = privateAddress;
