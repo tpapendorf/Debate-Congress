@@ -142,8 +142,26 @@ function open(file = DB_PATH) {
       body TEXT NOT NULL,
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS trackers (
+      id INTEGER PRIMARY KEY,
+      owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      data TEXT NOT NULL DEFAULT '{}',
+      updated_at INTEGER NOT NULL
+    );
   `);
+  migrate(db);
   return db;
+}
+
+// Add columns introduced after the first release, so existing databases keep working.
+function migrate(db) {
+  const has = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some((r) => r.name === col);
+  const add = (table, col, def) => { if (!has(table, col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`); };
+  add('chamber_members', 'speak_pos', 'REAL');      // speaking precedence queue (null = recompute from the record)
+  add('chamber_members', 'question_pos', 'REAL');   // questioning precedence queue
+  add('chambers', 'is_mock', 'INTEGER NOT NULL DEFAULT 0');
+  add('users', 'mock_chamber_id', 'INTEGER');       // set for made-up people in a mock tournament
 }
 
 module.exports = { open, DB_PATH };

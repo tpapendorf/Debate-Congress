@@ -11,6 +11,18 @@ A web app for running a high school Congressional Debate chamber (NSDA / WSFA st
 | **Competitor** | `competitor` role, added to a chamber | Live floor (who has the floor, timer, bill text), rise to speak aff/neg or to ask a question, vote on their device, see precedence and their own speeches. Never sees scores. |
 | **Judge / scorer** | `judge` role, added to a chamber | Score each speech with one tap (range set per chamber, e.g. 1–6 or 1–8), add comments, score the PO, and submit a top-N ranking. Each judge sees only their own scores. |
 
+## Laptop dashboard
+
+The **Dashboard** tab (presiding officer or admin) is built for a laptop at the front of the room: a big timer (space bar starts and pauses it), every competitor in one table with speeches, when they last spoke, questions and when they last asked, and Auth / Aff / Neg buttons on each row to recognize them. The table *is* the precedence list: it follows the rule automatically (recognizing someone drops them to the bottom), and you can drag rows to fix a mistake or set the opening order. **Random draw** shuffles people tied on count; **Reset to rule** undoes manual changes. Switch to **Questioning order** to log questioners the same way.
+
+## Personal tracker
+
+Any signed-in person can open **My trackers** from the home page and run the same dashboard privately, for any chamber, even at tournaments that don't use this app. Type in the people in the room, set what's on the floor, and track speeches, questions, precedence, recency and the timer. Trackers are saved to that person's account and nobody else can see them.
+
+## Mock tournament
+
+Admins can click **Create a mock tournament for testing** on the home page. It builds a practice chamber with 12 made-up competitors (one already the PO), 2 judges and 4 bills. A **View as** menu at the top lets the admin see and act as any of those people (vote, rise, score) from one laptop. **Setup → Delete this mock tournament** removes it and its made-up people. Made-up people never appear in the real people list.
+
 ## How a session flows
 
 1. Admin adds people (paste a list as `Name, School, role`), creates the chamber, adds members and legislation.

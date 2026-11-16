@@ -142,7 +142,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
   // ---------- users (admin) ----------
   app.get('/api/users', wrap((req) => {
     requireAdmin(req);
-    return { users: q('SELECT id, username, display_name, school, role FROM users ORDER BY role, display_name').all() };
+    return { users: q('SELECT id, username, display_name, school, role FROM users WHERE mock_chamber_id IS NULL ORDER BY role, display_name').all() };
   }));
   function makeUsername(name) {
     const base = String(name).toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '') || 'user';
@@ -214,9 +214,18 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     };
   }
   function loadChamber(req, need) {
-    const user = requireUser(req);
+    const realUser = requireUser(req);
     const c = getChamber(req.params.id);
+    // In a mock tournament an admin can act as any of its made-up people ("view as").
+    let user = realUser;
+    const asId = Number(req.headers['x-view-as'] || 0);
+    if (asId && realUser.role === 'admin' && c.is_mock) {
+      const target = q('SELECT id, username, display_name, school, role FROM users WHERE id = ? AND mock_chamber_id = ?').get(asId, c.id);
+      if (target) user = target;
+    }
     const m = membership(c, user);
+    m.realIsAdmin = realUser.role === 'admin';
+    m.viewingAs = user.id !== realUser.id;
     if (!m.isAdmin && !m.member) throw forbidden('You are not part of this chamber.');
     if (need === 'chair' && !m.canChair) throw forbidden('Only the presiding officer or an admin can do that.');
     if (need === 'admin' && !m.isAdmin) throw forbidden('Only an admin can do that.');
@@ -232,7 +241,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
       ? q('SELECT * FROM chambers ORDER BY id DESC').all()
       : q(`SELECT c.* FROM chambers c JOIN chamber_members m ON m.chamber_id = c.id
            WHERE m.user_id = ? ORDER BY c.id DESC`).all(u.id);
-    return { chambers: rows.map((c) => ({ id: c.id, name: c.name, status: c.status, is_po: c.po_user_id === u.id })) };
+    return { chambers: rows.map((c) => ({ id: c.id, name: c.name, status: c.status, is_mock: !!c.is_mock, is_po: c.po_user_id === u.id })) };
   }));
   app.post('/api/chambers', wrap((req) => {
     requireAdmin(req);
@@ -243,7 +252,10 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
   }));
   app.delete('/api/chambers/:id', wrap((req) => {
     const { c } = loadChamber(req, 'admin');
-    q('DELETE FROM chambers WHERE id = ?').run(c.id);
+    tx(() => {
+      q('DELETE FROM chambers WHERE id = ?').run(c.id);
+      if (c.is_mock) q('DELETE FROM users WHERE mock_chamber_id = ?').run(c.id);
+    });
     return { ok: true };
   }));
 
@@ -391,6 +403,8 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
       const sid = Number(r.lastInsertRowid);
       q('UPDATE chambers SET current_speech_id = ? WHERE id = ?').run(sid, c.id);
       q(`DELETE FROM speech_requests WHERE chamber_id = ? AND user_id = ? AND kind IN ('aff','neg')`).run(c.id, speaker.id);
+      ensureQueues(c);
+      moveToEnd(c, 'speak', speaker.id);
       setTimer(c, 'Speech', c.speech_seconds);
       return sid;
     });
@@ -415,13 +429,18 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     const uid = Number((req.body || {}).user_id);
     if (!q(`SELECT 1 FROM chamber_members m JOIN users u ON u.id = m.user_id
             WHERE m.chamber_id = ? AND u.id = ? AND u.role = 'competitor'`).get(c.id, uid)) throw bad('Not a competitor in this chamber.');
-    q('INSERT INTO questions (chamber_id, speech_id, questioner_id, asked_at) VALUES (?, ?, ?, ?)').run(c.id, c.current_speech_id, uid, Date.now());
-    q(`DELETE FROM speech_requests WHERE chamber_id = ? AND user_id = ? AND kind = 'question'`).run(c.id, uid);
+    tx(() => {
+      q('INSERT INTO questions (chamber_id, speech_id, questioner_id, asked_at) VALUES (?, ?, ?, ?)').run(c.id, c.current_speech_id, uid, Date.now());
+      q(`DELETE FROM speech_requests WHERE chamber_id = ? AND user_id = ? AND kind = 'question'`).run(c.id, uid);
+      ensureQueues(c);
+      moveToEnd(c, 'question', uid);
+    });
     return done(c);
   }));
   app.delete('/api/chambers/:id/questions/:qid', wrap((req) => {
     const { c } = loadChamber(req, 'chair');
     q('DELETE FROM questions WHERE id = ? AND chamber_id = ?').run(Number(req.params.qid), c.id);
+    resetQueue(c, 'question');
     return done(c);
   }));
 
@@ -438,6 +457,8 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     tx(() => {
       if (c.current_speech_id === sid) closeCurrentSpeech(c);
       q('DELETE FROM speeches WHERE id = ? AND chamber_id = ?').run(sid, c.id);
+      resetQueue(c, 'speak');
+      resetQueue(c, 'question');
     });
     return done(c);
   }));
@@ -603,6 +624,34 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     return done(c);
   }));
 
+  // ---------- precedence queue (chair can drag, reset to the rule, or draw a random starting order) ----------
+  app.post('/api/chambers/:id/queue', wrap((req) => {
+    const { c } = loadChamber(req, 'chair');
+    const { kind, action, ids } = req.body || {};
+    if (!QUEUES[kind]) throw bad('Pick the speaking or questioning list.');
+    tx(() => {
+      ensureQueues(c);
+      const comps = competitorsWithStats(c);
+      const current = [...comps].sort((a, b) => a[QUEUES[kind].col] - b[QUEUES[kind].col]).map((x) => x.id);
+      if (action === 'reset') resetQueue(c, kind);
+      else if (action === 'shuffle') {
+        // Random draw among people tied on count; the rule still decides everything else.
+        const k = QUEUES[kind];
+        const shuffled = comps.map((x) => ({ ...x, seat: crypto.randomInt(1e9) }));
+        setQueue(c, kind, precedence(shuffled, k.count, k.last).map((x) => x.id));
+      } else if (action === 'set') {
+        // The dashboard sends the visible list (it leaves out the PO); anyone left out keeps their place at the end.
+        const wanted = (ids || []).map(Number);
+        const known = new Set(current);
+        if (!wanted.length || new Set(wanted).size !== wanted.length || !wanted.every((id) => known.has(id))) {
+          throw bad('The list changed. Refresh and try again.');
+        }
+        setQueue(c, kind, [...wanted, ...current.filter((id) => !wanted.includes(id))]);
+      } else throw bad('Unknown action.');
+    });
+    return done(c);
+  }));
+
   // ---------- announcements ----------
   app.post('/api/chambers/:id/announcements', wrap((req) => {
     const { c, user } = loadChamber(req, 'chair');
@@ -664,7 +713,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
 
   // ---------- state (what each role sees) ----------
   function competitorsWithStats(c) {
-    const rows = q(`SELECT u.id, u.display_name, u.school, m.seat FROM chamber_members m JOIN users u ON u.id = m.user_id
+    const rows = q(`SELECT u.id, u.display_name, u.school, m.seat, m.speak_pos, m.question_pos FROM chamber_members m JOIN users u ON u.id = m.user_id
                     WHERE m.chamber_id = ? AND u.role = 'competitor' ORDER BY m.seat, u.display_name`).all(c.id);
     const sp = new Map(q(`SELECT speaker_id, COUNT(*) n, MAX(recognized_at) last FROM speeches WHERE chamber_id = ? GROUP BY speaker_id`).all(c.id).map((r) => [r.speaker_id, r]));
     const qs = new Map(q(`SELECT questioner_id, COUNT(*) n, MAX(asked_at) last FROM questions WHERE chamber_id = ? GROUP BY questioner_id`).all(c.id).map((r) => [r.questioner_id, r]));
@@ -684,8 +733,42 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
       || ((a.seat ?? 0) - (b.seat ?? 0)));
   }
 
+  // The live precedence list is a stored queue. It starts in rule order (fewest speeches, then least
+  // recent, then seat), each speaker or questioner moves to the bottom, and the chair can drag to adjust.
+  // Moving the speaker to the bottom is exactly the standard rule, so the queue only differs when someone drags.
+  const QUEUES = {
+    speak: { col: 'speak_pos', count: 'speeches', last: 'last_speech_at' },
+    question: { col: 'question_pos', count: 'questions', last: 'last_question_at' },
+  };
+  function setQueue(c, kind, ids) {
+    const upd = q(`UPDATE chamber_members SET ${QUEUES[kind].col} = ? WHERE chamber_id = ? AND user_id = ?`);
+    ids.forEach((id, i) => upd.run(i + 1, c.id, id));
+  }
+  function resetQueue(c, kind) {
+    const k = QUEUES[kind];
+    setQueue(c, kind, precedence(competitorsWithStats(c), k.count, k.last).map((x) => x.id));
+  }
+  // New members (or a database from before queues existed) get placed by the rule.
+  function ensureQueues(c) {
+    const comps = competitorsWithStats(c);
+    for (const [kind, k] of Object.entries(QUEUES)) {
+      const missing = comps.filter((x) => x[k.col] == null);
+      if (!missing.length) continue;
+      if (missing.length === comps.length) { resetQueue(c, kind); continue; }
+      const max = Math.max(...comps.map((x) => x[k.col] ?? 0));
+      const upd = q(`UPDATE chamber_members SET ${k.col} = ? WHERE chamber_id = ? AND user_id = ?`);
+      precedence(missing, k.count, k.last).forEach((x, i) => upd.run(max + i + 1, c.id, x.id));
+    }
+  }
+  function moveToEnd(c, kind, uid) {
+    const col = QUEUES[kind].col;
+    const max = q(`SELECT COALESCE(MAX(${col}), 0) m FROM chamber_members WHERE chamber_id = ?`).get(c.id).m;
+    q(`UPDATE chamber_members SET ${col} = ? WHERE chamber_id = ? AND user_id = ?`).run(max + 1, c.id, uid);
+  }
+
   app.get('/api/chambers/:id/state', wrap((req) => {
     const { c, user, m } = loadChamber(req);
+    ensureQueues(c);
     const comps = competitorsWithStats(c);
     const speakers = comps.filter((x) => !x.is_po);
     const nameOf = new Map(comps.map((x) => [x.id, x.display_name]));
@@ -744,8 +827,15 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
       },
       competitors: comps,
       judges,
-      speaking_precedence: precedence(speakers, 'speeches', 'last_speech_at').map((x) => x.id),
-      question_precedence: precedence(speakers, 'questions', 'last_question_at').map((x) => x.id),
+      speaking_precedence: [...speakers].sort((a, b) => a.speak_pos - b.speak_pos).map((x) => x.id),
+      question_precedence: [...speakers].sort((a, b) => a.question_pos - b.question_pos).map((x) => x.id),
+      speaking_rule_order: precedence(speakers, 'speeches', 'last_speech_at').map((x) => x.id),
+      question_rule_order: precedence(speakers, 'questions', 'last_question_at').map((x) => x.id),
+      is_mock: !!c.is_mock,
+      view_as_options: m.realIsAdmin && c.is_mock
+        ? q(`SELECT id, display_name, role FROM users WHERE mock_chamber_id = ? ORDER BY role DESC, display_name`).all(c.id)
+          .map((u) => ({ ...u, is_po: u.id === c.po_user_id }))
+        : null,
       legislation, speeches, questions, requests, motions, announcements, open_vote, past_votes,
       motion_kinds: Object.entries(MOTIONS).map(([k, v]) => ({ kind: k, ...v })),
     };
@@ -814,6 +904,78 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="chamber-${c.id}-results.csv"`);
     res.send(lines.join('\n'));
+  }));
+
+  // ---------- mock tournament (admin) ----------
+  const MOCK_NAMES = ['Avery Johnson', 'Blake Nguyen', 'Casey Patel', 'Dana Morales', 'Emery Brooks', 'Finley Okafor',
+    'Gray Thompson', 'Harper Liu', 'Indy Ramirez', 'Jules Andersen', 'Kai Robinson', 'Logan Schmidt', 'Morgan Diaz', 'Noel Kim'];
+  const MOCK_SCHOOLS = ['Lincoln HS', 'Roosevelt HS', 'Garfield HS', 'Kennedy HS'];
+  const MOCK_BILLS = [
+    ['A Bill to Require Financial Literacy Instruction in Public High Schools', 'bill'],
+    ['A Resolution to Rejoin the Trans-Pacific Partnership', 'resolution'],
+    ['A Bill to Fund High-Speed Rail in the Pacific Northwest', 'bill'],
+    ['A Bill to Lower the Federal Voting Age to Sixteen', 'bill'],
+  ];
+  app.post('/api/mock', wrap((req) => {
+    requireAdmin(req);
+    const size = Math.min(Math.max(Number((req.body || {}).competitors) || 12, 4), MOCK_NAMES.length);
+    const password = 'practice';
+    const id = tx(() => {
+      const label = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles' });
+      const cid = Number(q(`INSERT INTO chambers (name, is_mock) VALUES (?, 1)`).run(`Mock tournament (${label})`).lastInsertRowid);
+      const hash = hashPassword(password);
+      const mk = (name, school, role) => {
+        const uname = makeUsername(`mock.${name.split(' ')[0]}`);
+        const uid = Number(q('INSERT INTO users (username, display_name, school, role, password_hash, mock_chamber_id) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(uname, name, school, role, hash, cid).lastInsertRowid);
+        return uid;
+      };
+      const ins = q('INSERT INTO chamber_members (chamber_id, user_id, seat) VALUES (?, ?, ?)');
+      const comps = MOCK_NAMES.slice(0, size).map((n, i) => mk(n, MOCK_SCHOOLS[i % MOCK_SCHOOLS.length], 'competitor'));
+      comps.forEach((uid, i) => ins.run(cid, uid, i + 1));
+      ['Judge Rivera', 'Judge Chen'].forEach((n) => ins.run(cid, mk(n, '', 'judge'), null));
+      q('UPDATE chambers SET po_user_id = ? WHERE id = ?').run(comps[comps.length - 1], cid);
+      const legIns = q('INSERT INTO legislation (chamber_id, title, kind, author, body, docket_order) VALUES (?, ?, ?, ?, ?, ?)');
+      MOCK_BILLS.forEach(([t, k], i) => legIns.run(cid, t, k, MOCK_SCHOOLS[i % MOCK_SCHOOLS.length], 'Sample text for practice.', i + 1));
+      return cid;
+    });
+    return { id, password };
+  }));
+
+  // ---------- personal trackers (private to their owner) ----------
+  function getTracker(req) {
+    const u = requireUser(req);
+    const t = q('SELECT * FROM trackers WHERE id = ? AND owner_id = ?').get(Number(req.params.tid), u.id);
+    if (!t) throw notFound('Tracker not found.');
+    return t;
+  }
+  app.get('/api/trackers', wrap((req) => {
+    const u = requireUser(req);
+    return { trackers: q('SELECT id, name, updated_at FROM trackers WHERE owner_id = ? ORDER BY updated_at DESC').all(u.id) };
+  }));
+  app.post('/api/trackers', wrap((req) => {
+    const u = requireUser(req);
+    const name = String((req.body || {}).name || '').trim().slice(0, 100) || 'My chamber';
+    const r = q('INSERT INTO trackers (owner_id, name, data, updated_at) VALUES (?, ?, ?, ?)').run(u.id, name, '{}', Date.now());
+    return { id: Number(r.lastInsertRowid) };
+  }));
+  app.get('/api/trackers/:tid', wrap((req) => {
+    const t = getTracker(req);
+    return { id: t.id, name: t.name, data: JSON.parse(t.data || '{}'), updated_at: t.updated_at };
+  }));
+  app.put('/api/trackers/:tid', wrap((req) => {
+    const t = getTracker(req);
+    const b = req.body || {};
+    const data = b.data === undefined ? t.data : JSON.stringify(b.data);
+    if (data.length > 500000) throw bad('This tracker is too large.');
+    const name = b.name === undefined ? t.name : (String(b.name).trim().slice(0, 100) || t.name);
+    q('UPDATE trackers SET name = ?, data = ?, updated_at = ? WHERE id = ?').run(name, data, Date.now(), t.id);
+    return { ok: true };
+  }));
+  app.delete('/api/trackers/:tid', wrap((req) => {
+    const t = getTracker(req);
+    q('DELETE FROM trackers WHERE id = ?').run(t.id);
+    return { ok: true };
   }));
 
   app.get('/api/chambers/:id/events', (req, res) => {
