@@ -443,7 +443,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
   }));
   app.delete('/api/chambers/:id/questions/:qid', wrap((req) => {
     const { c } = loadChamber(req, 'chair');
-    q('DELETE FROM questions WHERE id = ? AND chamber_id = ?').run(Number(req.params.qid), c.id);
+    q('DELETE FROM questions WHERE id = ? AND chamber_id = ? AND logged_by IS NULL').run(Number(req.params.qid), c.id);
     resetQueue(c, 'question');
     return done(c);
   }));
@@ -807,6 +807,42 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     return { ok: true };
   }));
 
+  // Questions in your own log: asked during one of your logged speeches.
+  app.post('/api/chambers/:id/my-log/:sid/questions', wrap((req) => {
+    const { c, user } = loadLogger(req);
+    const s = q('SELECT id, speaker_id FROM speeches WHERE id = ? AND chamber_id = ? AND logged_by = ?').get(Number(req.params.sid), c.id, user.id);
+    if (!s) throw notFound('Speech not found.');
+    const uid = Number((req.body || {}).questioner_id);
+    if (!q(`SELECT 1 FROM chamber_members m JOIN users u ON u.id = m.user_id WHERE m.chamber_id = ? AND u.id = ? AND u.role = 'competitor'`).get(c.id, uid)) throw bad('Pick a competitor in this chamber.');
+    if (uid === s.speaker_id) throw bad('The speaker cannot question themselves.');
+    const r = q('INSERT INTO questions (chamber_id, speech_id, questioner_id, asked_at, logged_by) VALUES (?, ?, ?, ?, ?)').run(c.id, s.id, uid, Date.now(), user.id);
+    return { ok: true, question_id: Number(r.lastInsertRowid) };
+  }));
+  app.delete('/api/chambers/:id/my-questions/:qid', wrap((req) => {
+    const { c, user } = loadLogger(req);
+    q('DELETE FROM questions WHERE id = ? AND chamber_id = ? AND logged_by = ?').run(Number(req.params.qid), c.id, user.id);
+    return { ok: true };
+  }));
+
+  // ---------- question scores (judges: shown beside speech points, never added in; competitors: practice) ----------
+  app.put('/api/chambers/:id/question-scores/:qid', wrap((req) => {
+    const { c, user, m } = loadChamber(req);
+    if (!m.isJudge && !m.isCompetitor) throw forbidden('Only judges and competitors in this chamber can score questions.');
+    if (m.isJudge) assertOpen(c, user.id);
+    const x = q('SELECT id, questioner_id FROM questions WHERE id = ? AND chamber_id = ? AND (logged_by IS NULL OR logged_by = ?)').get(Number(req.params.qid), c.id, user.id);
+    if (!x) throw notFound('Question not found.');
+    if (x.questioner_id === user.id) throw bad('You cannot score your own question.');
+    const b = req.body || {};
+    if (b.points === null || b.points === '') {
+      q('DELETE FROM question_scores WHERE question_id = ? AND scorer_id = ?').run(x.id, user.id);
+      return { ok: true };
+    }
+    q(`INSERT INTO question_scores (question_id, scorer_id, points, comment, updated_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (question_id, scorer_id) DO UPDATE SET points = excluded.points, comment = excluded.comment, updated_at = excluded.updated_at`)
+      .run(x.id, user.id, checkPoints(c, b.points), String(b.comment || '').slice(0, 2000), Date.now());
+    return { ok: true };
+  }));
+
   // ---------- practice ballots (competitors score for reflection; never counted) ----------
   app.put('/api/chambers/:id/practice/scores/:sid', wrap((req) => {
     const { c, user } = loadChamber(req, 'competitor');
@@ -858,7 +894,9 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
                       WHERE s.chamber_id = ? AND ss.judge_id = ? AND s.speaker_id = ?`).all(c.id, j.id, user.id);
       const po = q('SELECT points, comment FROM po_scores WHERE chamber_id = ? AND judge_id = ? AND po_user_id = ?').get(c.id, j.id, user.id) || null;
       const myRank = q('SELECT rank FROM rankings WHERE chamber_id = ? AND judge_id = ? AND user_id = ?').get(c.id, j.id, user.id)?.rank ?? null;
-      const entry = { judge_id: j.id, judge_name: j.display_name, level: b.publish, my_scores: mine, my_po_score: po, my_rank: myRank };
+      const myQ = q(`SELECT qs.question_id, qs.points, qs.comment FROM question_scores qs JOIN questions x ON x.id = qs.question_id
+                     WHERE x.chamber_id = ? AND qs.scorer_id = ? AND x.questioner_id = ?`).all(c.id, j.id, user.id);
+      const entry = { judge_id: j.id, judge_name: j.display_name, level: b.publish, my_scores: mine, my_question_scores: myQ, my_po_score: po, my_rank: myRank };
       if (b.publish === 'all') {
         // Everyone sees each competitor's point total and the judge's ranking, not other people's comments.
         const totals = new Map();
@@ -883,7 +921,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     const rows = q(`SELECT u.id, u.display_name, u.school, m.seat, m.speak_pos, m.question_pos FROM chamber_members m JOIN users u ON u.id = m.user_id
                     WHERE m.chamber_id = ? AND u.role = 'competitor' ORDER BY m.seat, u.display_name`).all(c.id);
     const sp = new Map(q(`SELECT speaker_id, COUNT(*) n, MAX(recognized_at) last FROM speeches WHERE chamber_id = ? AND logged_by IS NULL GROUP BY speaker_id`).all(c.id).map((r) => [r.speaker_id, r]));
-    const qs = new Map(q(`SELECT questioner_id, COUNT(*) n, MAX(asked_at) last FROM questions WHERE chamber_id = ? GROUP BY questioner_id`).all(c.id).map((r) => [r.questioner_id, r]));
+    const qs = new Map(q(`SELECT questioner_id, COUNT(*) n, MAX(asked_at) last FROM questions WHERE chamber_id = ? AND logged_by IS NULL GROUP BY questioner_id`).all(c.id).map((r) => [r.questioner_id, r]));
     return rows.map((r) => ({
       ...r,
       is_po: r.id === c.po_user_id,
@@ -948,8 +986,11 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
                         WHERE s.chamber_id = ? AND (s.logged_by IS NULL OR s.logged_by = ?) ORDER BY s.recognized_at`).all(c.id, user.id);
     const speeches = speechRows.filter((x) => x.logged_by == null);
     const my_log = speechRows.filter((x) => x.logged_by != null).map((x) => ({ ...x, mine: true }));
-    const questions = q(`SELECT q.id, q.speech_id, q.questioner_id, q.asked_at FROM questions q WHERE q.chamber_id = ? ORDER BY q.asked_at`).all(c.id)
+    const questionRows = q(`SELECT q.id, q.speech_id, q.questioner_id, q.asked_at, q.logged_by FROM questions q
+                            WHERE q.chamber_id = ? AND (q.logged_by IS NULL OR q.logged_by = ?) ORDER BY q.asked_at`).all(c.id, user.id)
       .map((x) => ({ ...x, questioner_name: nameOf.get(x.questioner_id) }));
+    const questions = questionRows.filter((x) => x.logged_by == null);
+    const my_questions = questionRows.filter((x) => x.logged_by != null);
     const requests = q('SELECT user_id, kind, requested_at FROM speech_requests WHERE chamber_id = ? ORDER BY requested_at').all(c.id)
       .map((x) => ({ ...x, name: nameOf.get(x.user_id) }));
     const motions = q('SELECT * FROM motions WHERE chamber_id = ? ORDER BY created_at DESC').all(c.id)
@@ -1007,9 +1048,13 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
         ? q(`SELECT id, display_name, role FROM users WHERE mock_chamber_id = ? ORDER BY role DESC, display_name`).all(c.id)
           .map((u) => ({ ...u, is_po: u.id === c.po_user_id }))
         : null,
-      legislation, speeches, my_log, questions, requests, motions, announcements, open_vote, past_votes,
+      legislation, speeches, my_log, questions, my_questions, requests, motions, announcements, open_vote, past_votes,
       motion_kinds: Object.entries(MOTIONS).map(([k, v]) => ({ kind: k, ...v })),
     };
+    if (m.isJudge || m.isCompetitor) {
+      out.my_question_scores = Object.fromEntries(q(`SELECT qs.question_id, qs.points, qs.comment FROM question_scores qs JOIN questions x ON x.id = qs.question_id
+                                                     WHERE x.chamber_id = ? AND qs.scorer_id = ?`).all(c.id, user.id).map((r) => [r.question_id, { points: r.points, comment: r.comment }]));
+    }
     if (m.isJudge) {
       out.my_scores = Object.fromEntries(q(`SELECT ss.speech_id, ss.points, ss.comment FROM speech_scores ss JOIN speeches s ON s.id = ss.speech_id
                                             WHERE s.chamber_id = ? AND ss.judge_id = ?`).all(c.id, user.id).map((r) => [r.speech_id, { points: r.points, comment: r.comment }]));
@@ -1042,6 +1087,8 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     const logged = new Map();
     for (const r of q(`SELECT speaker_id, logged_by, COUNT(*) n FROM speeches s JOIN users u ON u.id = s.logged_by
                        WHERE s.chamber_id = ? AND u.role = 'judge' GROUP BY speaker_id, logged_by`).all(c.id)) logged.set(r.speaker_id, Math.max(logged.get(r.speaker_id) || 0, r.n));
+    const qPoints = new Map(q(`SELECT x.questioner_id uid, SUM(qs.points) pts, COUNT(*) n FROM question_scores qs JOIN questions x ON x.id = qs.question_id
+                                JOIN users u ON u.id = qs.scorer_id WHERE x.chamber_id = ? AND u.role = 'judge' GROUP BY x.questioner_id`).all(c.id).map((r) => [r.uid, r]));
     const rows = comps.map((p) => {
       const mine = scores.filter((s) => s.speaker_id === p.id);
       const poMine = po.filter((s) => s.po_user_id === p.id);
@@ -1056,7 +1103,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
       return {
         id: p.id, name: p.display_name, school: p.school, was_po: poMine.length > 0 || p.is_po,
         speeches: p.speeches || logged.get(p.id) || 0, questions: p.questions,
-        total_points: total, average_points: all.length ? Math.round((total / all.length) * 100) / 100 : null,
+        total_points: total, question_points: qPoints.get(p.id)?.pts || 0, questions_scored: qPoints.get(p.id)?.n || 0, average_points: all.length ? Math.round((total / all.length) * 100) / 100 : null,
         rank_total, by_judge,
       };
     });
@@ -1079,11 +1126,11 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     const { c } = loadChamber(req, 'admin');
     const r = computeResults(c);
     const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const head = ['Place', 'Name', 'School', 'Speeches', 'Questions', 'Total points', 'Average', 'Rank total',
+    const head = ['Place', 'Name', 'School', 'Speeches', 'Questions', 'Total points', 'Average', 'Rank total', 'Question points (not in total)',
       ...r.judges.flatMap((j) => [`${j.display_name} rank`, `${j.display_name} points`])];
     const lines = [head.map(esc).join(',')];
     for (const row of r.rows) {
-      lines.push([row.place, row.name + (row.was_po ? ' (PO)' : ''), row.school, row.speeches, row.questions, row.total_points, row.average_points, row.rank_total,
+      lines.push([row.place, row.name + (row.was_po ? ' (PO)' : ''), row.school, row.speeches, row.questions, row.total_points, row.average_points, row.rank_total, row.question_points,
         ...row.by_judge.flatMap((b) => [b.rank ?? '', b.points])].map(esc).join(','));
     }
     res.setHeader('Content-Type', 'text/csv');
