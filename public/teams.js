@@ -117,11 +117,32 @@ async function renderTeam(id, tab = 'research', sub, sub2) {
   $view.innerHTML = `
     <a href="#/teams">← Teams</a>
     <div class="spread"><h1>${esc(data.team.name)}</h1><span class="row">${data.team.school ? `<span class="small muted">${esc(data.team.school)}</span>` : ''}<span class="pill">${ROLE_LABEL[data.me.role]}</span></span></div>
+    <label class="switch-row small" title="Saves this team's research, your speech plans and notes on this device so they open without Wi-Fi."><input type="checkbox" data-keep-offline="${id}" ${keepOffline(id) ? 'checked' : ''}> Keep available offline <span class="muted" data-keep-label>${keepOffline(id) ? `· ${esc(keptLabel(id))}` : ''}</span></label>
     <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/team/${id}/${k}" class="${k === active ? 'active' : ''}">${l}</a>`).join('')}</nav>
     ${body}`;
   void sub2;
+  if (keepOffline(id) && Offline.isOnline() && Date.now() - (keptAt(id) || 0) > 10 * 60 * 1000) saveTeamOffline(id);
+}
+// ---------- keep a team on this device ----------
+const keepKey = (id) => `congress.keep.${me?.id}.${id}`;
+function keepOffline(id) { try { return !!localStorage.getItem(keepKey(id)); } catch { return false; } }
+function keptAt(id) { try { return JSON.parse(localStorage.getItem(keepKey(id)) || 'null')?.at; } catch { return null; } }
+function keptLabel(id) { const t = keptAt(id); return t ? `saved ${new Date(t).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}` : 'saving…'; }
+async function saveTeamOffline(id) {
+  const base = `/api/teams/${id}`;
+  try {
+    const data = await api('GET', base);
+    const { plans } = await api('GET', `${base}/prep`);
+    const urls = [...data.bills.map((b) => `${base}/bills/${b.id}`), ...plans.map((p) => `${base}/plans/${p.id}`), `${base}/progress`];
+    await Offline.keep(urls);
+    try { localStorage.setItem(keepKey(id), JSON.stringify({ at: Date.now() })); } catch { /* storage blocked */ }
+    const el = document.querySelector('[data-keep-label]');
+    if (el) el.textContent = `· ${keptLabel(id)}`;
+    return urls.length + 2;
+  } catch (e) { toast(`Could not save for offline: ${e.message}`, true); return 0; }
 }
 const reTeam = () => route();
+const savedToast = (r, msg) => toast(r?.queued ? `${msg} on this device. It sends when you are back online.` : msg);
 
 // ---------- research ----------
 async function viewResearch() {
@@ -160,11 +181,13 @@ function itemForm(section, item = {}, billId) {
         <div class="inline-fields"><input name="cite_source" placeholder="Publication / website" value="${esc(item.cite_source || '')}"><input name="cite_date" placeholder="Date" value="${esc(item.cite_date || '')}"></div>
         <div class="small muted" data-cite-msg></div>
       </div></details>
+    ${item.id ? `<input type="hidden" name="base_updated_at" value="${item.base_updated_at ?? item.updated_at ?? ''}">` : ''}
     <div class="row"><button class="sm primary">${item.id ? 'Save' : 'Add'}</button>${item.id ? `<button type="button" class="sm ghost" data-tact="delete-item" data-bill="${billId}" data-id="${item.id}">Delete</button>` : ''}</div>
   </form>`;
 }
 function itemView(i, billId) {
-  return `<li class="item"><div class="spread"><div>${i.section === 'evidence' && i.side !== 'both' ? `<span class="pill ${i.side}">${i.side}</span> ` : ''}<strong>${esc(i.text)}</strong></div></div>
+  const flag = i.pending ? '<span class="pill warn">Waiting to send</span> ' : i.conflict_of ? '<span class="pill failed" title="Saved while offline after a teammate changed the same entry. Keep one and delete the other.">Offline copy</span> ' : '';
+  return `<li class="item${i.pending ? ' pending' : i.conflict_of ? ' conflict' : ''}"><div class="spread"><div>${flag}${i.section === 'evidence' && i.side !== 'both' ? `<span class="pill ${i.side}">${i.side}</span> ` : ''}<strong>${esc(i.text)}</strong></div></div>
     ${i.detail ? `<div class="small">${esc(i.detail)}</div>` : ''}
     ${citation(i)}
     <div class="small muted">${esc(i.updated_by_name || i.created_by_name || '')} · ${fmtDate(i.updated_at)}${citationFull(i) ? ` · <button class="linkish" data-tact="copy-cite" data-text="${esc(citationFull(i))}">Copy citation</button>` : ''}</div>
@@ -366,12 +389,12 @@ document.addEventListener('submit', async (e) => {
       case 'new-team': { const r = await api('POST', '/api/teams', d); go(`#/team/${r.id}/members`); break; }
       case 'new-bill': { const r = await api('POST', T('/bills'), d); go(`#/team/${teamCtx.id}/bill/${r.id}`); break; }
       case 'edit-bill': await api('PUT', T(`/bills/${f.dataset.id}`), d); toast('Saved'); reTeam(); break;
-      case 'new-item': await api('POST', T(`/bills/${f.dataset.bill}/items`), { ...d, section: f.dataset.section }); toast('Added'); reTeam(); break;
-      case 'edit-item': await api('PUT', T(`/bills/${f.dataset.bill}/items/${f.dataset.id}`), { ...d, section: f.dataset.section }); toast('Saved'); reTeam(); break;
+      case 'new-item': savedToast(await api('POST', T(`/bills/${f.dataset.bill}/items`), { ...d, section: f.dataset.section }), 'Added'); reTeam(); break;
+      case 'edit-item': { const r = await api('PUT', T(`/bills/${f.dataset.bill}/items/${f.dataset.id}`), { ...d, section: f.dataset.section }); if (r?.conflict) toast('A teammate changed this while you were away. Your version was saved as a copy next to theirs.', true); else savedToast(r, 'Saved'); reTeam(); break; }
       case 'new-plan': { const r = await api('POST', T('/plans'), d); go(`#/team/${teamCtx.id}/plan/${r.id}`); break; }
-      case 'save-plan': await api('PUT', T(`/plans/${f.dataset.id}`), { ...d, shared_with_leaders: !!f.querySelector('[name=shared_with_leaders]')?.checked }); toast('Saved'); reTeam(); break;
+      case 'save-plan': savedToast(await api('PUT', T(`/plans/${f.dataset.id}`), { ...d, shared_with_leaders: !!f.querySelector('[name=shared_with_leaders]')?.checked }), 'Saved'); reTeam(); break;
       case 'new-note': { const r = await api('POST', T('/notes'), d); go(`#/team/${teamCtx.id}/note/${r.id}`); break; }
-      case 'save-note': await api('PUT', T(`/notes/${f.dataset.id}`), d); toast('Saved'); break;
+      case 'save-note': savedToast(await api('PUT', T(`/notes/${f.dataset.id}`), d), 'Saved'); break;
       case 'new-entry': await api('POST', T('/progress'), d); toast('Logged'); reTeam(); break;
       case 'new-goal': await api('POST', T('/goals'), { ...d, user_id: Number(f.dataset.user) }); toast('Goal added'); reTeam(); break;
       case 'new-link': await api('POST', T('/links'), { ...d, bill_id: f.dataset.bill ? Number(f.dataset.bill) : undefined, plan_id: f.dataset.plan ? Number(f.dataset.plan) : undefined }); toast('Link added'); reTeam(); break;
@@ -388,6 +411,16 @@ document.addEventListener('submit', async (e) => {
 document.addEventListener('change', async (e) => {
   const el = e.target;
   try {
+    if (el.dataset.keepOffline) {
+      const id = Number(el.dataset.keepOffline);
+      if (el.checked) {
+        try { localStorage.setItem(keepKey(id), JSON.stringify({ at: 0 })); } catch { /* storage blocked */ }
+        toast('Saving this team on this device…');
+        const n = await saveTeamOffline(id);
+        if (n) toast('Saved. Research, your speech plans and notes open without Wi-Fi now.');
+      } else { try { localStorage.removeItem(keepKey(id)); } catch { /* storage blocked */ } toast('This team is no longer kept up to date on this device.'); }
+      return;
+    }
     if (el.dataset.roleFor) { await api('POST', T(`/members/${el.dataset.roleFor}`), { action: 'role', role: el.value }); toast('Role updated'); reTeam(); }
     else if (el.dataset.goal) { await api('PUT', T(`/goals/${el.dataset.goal}`), { done: el.checked }); reTeam(); }
   } catch (err) { toast(err.message, true); reTeam(); }

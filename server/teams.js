@@ -107,6 +107,8 @@ function schema(db) {
   `);
   const cols = db.prepare('PRAGMA table_info(bill_items)').all().map((r) => r.name);
   if (!cols.includes('cite_title')) db.exec(`ALTER TABLE bill_items ADD COLUMN cite_title TEXT NOT NULL DEFAULT ''`);
+  // An offline edit that crossed someone else's newer edit is saved as a separate copy pointing at the original.
+  if (!cols.includes('conflict_of')) db.exec('ALTER TABLE bill_items ADD COLUMN conflict_of INTEGER');
 }
 
 // What a link points at, from its address alone (we never need access to the Google file itself).
@@ -212,7 +214,7 @@ module.exports = function mountTeams(app, h) {
   const { db, q, tx, wrap, requireUser, bad, forbidden, notFound, hashPassword, startSession, makeUsername } = h;
   const lookupCache = new Map();
   schema(db);
-  const now = () => Date.now();
+  const now = h.now || (() => Date.now());
   const str = (v, max = 5000) => String(v ?? '').trim().slice(0, max);
 
   function newCode() {
@@ -470,6 +472,13 @@ module.exports = function mountTeams(app, h) {
     const it = q('SELECT * FROM bill_items WHERE id = ? AND bill_id = ?').get(Number(req.params.iid), bill.id);
     if (!it) throw notFound();
     const f = itemFields(req.body || {}, it);
+    const base = Number((req.body || {}).base_updated_at);
+    if (base && it.updated_at > base && it.updated_by !== user.id) {
+      const r = q(`INSERT INTO bill_items (bill_id, section, side, text, detail, cite_title, cite_source, cite_author, cite_date, cite_url, created_by, updated_by, updated_at, conflict_of)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(bill.id, f.section, f.side, f.text, f.detail, f.cite_title, f.cite_source, f.cite_author, f.cite_date, f.cite_url, user.id, user.id, now(), it.id);
+      return { ok: true, conflict: true, id: Number(r.lastInsertRowid) };
+    }
     q(`UPDATE bill_items SET section = ?, side = ?, text = ?, detail = ?, cite_title = ?, cite_source = ?, cite_author = ?, cite_date = ?, cite_url = ?, updated_by = ?, updated_at = ? WHERE id = ?`)
       .run(f.section, f.side, f.text, f.detail, f.cite_title, f.cite_source, f.cite_author, f.cite_date, f.cite_url, user.id, now(), it.id);
     return { ok: true };
@@ -695,6 +704,7 @@ module.exports = function mountTeams(app, h) {
   }));
 };
 
+module.exports.schema = schema;
 module.exports.parseCitation = parseCitation;
 module.exports.linkKind = linkKind;
 module.exports.privateAddress = privateAddress;

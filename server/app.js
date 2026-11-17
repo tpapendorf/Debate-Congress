@@ -50,9 +50,21 @@ const MOTIONS = {
   other: { label: 'Other', threshold: 'majority' },
 };
 
-function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}) {
+function createApp(db0, { publicDir = path.join(__dirname, '..', 'public'), dbFile = null, backupDir = null } = {}) {
+  let db = db0; // replaced in place when an admin restores a backup
   const app = express();
   app.use(express.json({ limit: '1mb' }));
+
+  // Changes made offline are sent later with the time they really happened (X-Op-Time, already in server time).
+  // While a request is handled, now() returns that time, so speeches, questions and timers line up with the round.
+  let opNow = null;
+  const now = () => opNow ?? Date.now();
+  function opTime(req) {
+    const t = Number(req.headers['x-op-time']);
+    if (req.method === 'GET' || !Number.isFinite(t)) return null;
+    const real = Date.now();
+    return t >= real - 24 * 3600 * 1000 && t <= real ? Math.round(t) : null;
+  }
 
   const q = (sql) => db.prepare(sql);
   const tx = (fn) => {
@@ -80,10 +92,28 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
               JOIN users u ON u.id = s.user_id WHERE s.token = ?`).get(token) || null;
   }
   app.use((req, _res, next) => { req.user = currentUser(req); next(); });
+
+  // A change sent again after a dropped connection (same X-Op-Id) is answered from the first result, never applied twice.
+  q('DELETE FROM client_ops WHERE created_at < ?').run(Date.now() - 14 * 24 * 3600 * 1000);
+  app.use((req, res, next) => {
+    const op = String(req.headers['x-op-id'] || '');
+    if (req.method === 'GET' || !req.user || !/^[\w-]{8,64}$/.test(op)) return next();
+    const seen = q('SELECT status, body FROM client_ops WHERE op_id = ? AND user_id = ?').get(op, req.user.id);
+    if (seen) return res.status(seen.status).type('application/json').send(seen.body);
+    const json = res.json.bind(res);
+    res.json = (data) => {
+      if (res.statusCode < 500) {
+        try { q('INSERT OR IGNORE INTO client_ops (op_id, user_id, status, body, created_at) VALUES (?, ?, ?, ?, ?)').run(op, req.user.id, res.statusCode, JSON.stringify(data ?? null), Date.now()); } catch { /* best effort */ }
+      }
+      return json(data);
+    };
+    next();
+  });
   const requireUser = (req) => { if (!req.user) throw new HttpError(401, 'Please sign in.'); return req.user; };
   const requireAdmin = (req) => { const u = requireUser(req); if (u.role !== 'admin') throw forbidden(); return u; };
 
   const wrap = (fn) => (req, res) => {
+    opNow = opTime(req);
     try {
       const out = fn(req, res);
       if (out !== undefined && !res.headersSent) res.json(out);
@@ -94,7 +124,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
       }
       console.error(e);
       res.status(500).json({ error: 'Something went wrong.' });
-    }
+    } finally { opNow = null; }
   };
 
   function startSession(res, userId) {
@@ -353,17 +383,17 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
   // ---------- chair (presiding officer) controls ----------
   function setTimer(c, label, duration) {
     q('UPDATE chambers SET timer_label = ?, timer_duration = ?, timer_started_at = ?, timer_elapsed_ms = 0 WHERE id = ?')
-      .run(label, duration, Date.now(), c.id);
+      .run(label, duration, now(), c.id);
   }
   function timerElapsedMs(c) {
-    return c.timer_elapsed_ms + (c.timer_started_at ? Date.now() - c.timer_started_at : 0);
+    return c.timer_elapsed_ms + (c.timer_started_at ? now() - c.timer_started_at : 0);
   }
   function closeCurrentSpeech(c) {
     if (!c.current_speech_id) return;
     const s = q('SELECT * FROM speeches WHERE id = ?').get(c.current_speech_id);
     if (s && !s.ended_at) {
       const dur = s.duration_seconds ?? (c.timer_label === 'Speech' ? Math.round(timerElapsedMs(c) / 1000) : null);
-      q('UPDATE speeches SET ended_at = ?, duration_seconds = ? WHERE id = ?').run(Date.now(), dur, s.id);
+      q('UPDATE speeches SET ended_at = ?, duration_seconds = ? WHERE id = ?').run(now(), dur, s.id);
     }
     q(`UPDATE chambers SET current_speech_id = NULL, timer_label = NULL, timer_duration = NULL,
        timer_started_at = NULL, timer_elapsed_ms = 0 WHERE id = ?`).run(c.id);
@@ -403,7 +433,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     const id = tx(() => {
       closeCurrentSpeech(c);
       const r = q('INSERT INTO speeches (chamber_id, legislation_id, speaker_id, side, recognized_at) VALUES (?, ?, ?, ?, ?)')
-        .run(c.id, c.current_legislation_id, speaker.id, side, Date.now());
+        .run(c.id, c.current_legislation_id, speaker.id, side, now());
       const sid = Number(r.lastInsertRowid);
       q('UPDATE chambers SET current_speech_id = ? WHERE id = ?').run(sid, c.id);
       q(`DELETE FROM speech_requests WHERE chamber_id = ? AND user_id = ? AND kind IN ('aff','neg')`).run(c.id, speaker.id);
@@ -433,13 +463,14 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     const uid = Number((req.body || {}).user_id);
     if (!q(`SELECT 1 FROM chamber_members m JOIN users u ON u.id = m.user_id
             WHERE m.chamber_id = ? AND u.id = ? AND u.role = 'competitor'`).get(c.id, uid)) throw bad('Not a competitor in this chamber.');
-    tx(() => {
-      q('INSERT INTO questions (chamber_id, speech_id, questioner_id, asked_at) VALUES (?, ?, ?, ?)').run(c.id, c.current_speech_id, uid, Date.now());
+    const qid = tx(() => {
+      const r = q('INSERT INTO questions (chamber_id, speech_id, questioner_id, asked_at) VALUES (?, ?, ?, ?)').run(c.id, c.current_speech_id, uid, now());
       q(`DELETE FROM speech_requests WHERE chamber_id = ? AND user_id = ? AND kind = 'question'`).run(c.id, uid);
       ensureQueues(c);
       moveToEnd(c, 'question', uid);
+      return Number(r.lastInsertRowid);
     });
-    return done(c);
+    return done(c, { question_id: qid });
   }));
   app.delete('/api/chambers/:id/questions/:qid', wrap((req) => {
     const { c } = loadChamber(req, 'chair');
@@ -474,7 +505,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     if (action === 'pause' && c.timer_started_at) {
       q('UPDATE chambers SET timer_elapsed_ms = ?, timer_started_at = NULL WHERE id = ?').run(timerElapsedMs(c), c.id);
     } else if (action === 'resume' && !c.timer_started_at && c.timer_duration != null) {
-      q('UPDATE chambers SET timer_started_at = ? WHERE id = ?').run(Date.now(), c.id);
+      q('UPDATE chambers SET timer_started_at = ? WHERE id = ?').run(now(), c.id);
     } else if (action === 'reset' && c.timer_duration != null) {
       q('UPDATE chambers SET timer_elapsed_ms = 0, timer_started_at = NULL WHERE id = ?').run(c.id);
     } else if (action === 'custom') {
@@ -493,7 +524,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     const { kind, mover_id, details } = req.body || {};
     if (!MOTIONS[kind]) throw bad('Unknown motion.');
     const r = q('INSERT INTO motions (chamber_id, legislation_id, kind, mover_id, details, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(c.id, c.current_legislation_id, kind, mover_id ? Number(mover_id) : null, String(details || ''), Date.now());
+      .run(c.id, c.current_legislation_id, kind, mover_id ? Number(mover_id) : null, String(details || ''), now());
     return done(c, { motion_id: Number(r.lastInsertRowid) });
   }));
   app.post('/api/chambers/:id/motions/:mid/status', wrap((req) => {
@@ -538,7 +569,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     } else throw bad('Vote on legislation or a motion.');
     if (req.body.threshold === 'two_thirds' || req.body.threshold === 'majority') threshold = req.body.threshold;
     q('INSERT INTO vote_rounds (chamber_id, target_type, target_id, threshold, opened_at) VALUES (?, ?, ?, ?, ?)')
-      .run(c.id, target_type, Number(target_id), threshold, Date.now());
+      .run(c.id, target_type, Number(target_id), threshold, now());
     return done(c);
   }));
   function tally(vid) {
@@ -559,7 +590,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     const t = tally(v.id);
     const result = cancel ? 'cancelled' : (passes(t, v.threshold) ? 'passed' : 'failed');
     tx(() => {
-      q(`UPDATE vote_rounds SET status = 'closed', result = ?, closed_at = ? WHERE id = ?`).run(result, Date.now(), v.id);
+      q(`UPDATE vote_rounds SET status = 'closed', result = ?, closed_at = ? WHERE id = ?`).run(result, now(), v.id);
       if (cancel) {
         if (v.target_type === 'motion') q(`UPDATE motions SET status = 'pending' WHERE id = ?`).run(v.target_id);
         return;
@@ -615,7 +646,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     if (!['aff', 'neg', 'question'].includes(kind)) throw bad('Bad request.');
     if (c.po_user_id === user.id) throw bad('The presiding officer does not speak on legislation.');
     if (kind !== 'question') q(`DELETE FROM speech_requests WHERE chamber_id = ? AND user_id = ? AND kind IN ('aff','neg')`).run(c.id, user.id);
-    q('INSERT OR REPLACE INTO speech_requests (chamber_id, user_id, kind, requested_at) VALUES (?, ?, ?, ?)').run(c.id, user.id, kind, Date.now());
+    q('INSERT OR REPLACE INTO speech_requests (chamber_id, user_id, kind, requested_at) VALUES (?, ?, ?, ?)').run(c.id, user.id, kind, now());
     return done(c);
   }));
   app.delete('/api/chambers/:id/requests/:kind', wrap((req) => {
@@ -662,7 +693,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     const { c, user } = loadChamber(req, 'chair');
     const body = String((req.body || {}).body || '').trim();
     if (!body) throw bad('Write something first.');
-    q('INSERT INTO announcements (chamber_id, author_id, body, created_at) VALUES (?, ?, ?, ?)').run(c.id, user.id, body.slice(0, 1000), Date.now());
+    q('INSERT INTO announcements (chamber_id, author_id, body, created_at) VALUES (?, ?, ?, ?)').run(c.id, user.id, body.slice(0, 1000), now());
     return done(c);
   }));
   app.delete('/api/chambers/:id/announcements/:aid', wrap((req) => {
@@ -702,7 +733,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     }
     q(`INSERT INTO speech_scores (speech_id, judge_id, points, comment, updated_at) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (speech_id, judge_id) DO UPDATE SET points = excluded.points, comment = excluded.comment, updated_at = excluded.updated_at`)
-      .run(s.id, user.id, checkPoints(c, b.points), String(b.comment || '').slice(0, 2000), Date.now());
+      .run(s.id, user.id, checkPoints(c, b.points), String(b.comment || '').slice(0, 2000), now());
     return { ok: true };
   }));
   app.put('/api/chambers/:id/po-score', wrap((req) => {
@@ -713,7 +744,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     if (!po) throw bad('There is no presiding officer to score.');
     q(`INSERT INTO po_scores (chamber_id, judge_id, po_user_id, points, comment, updated_at) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (chamber_id, judge_id, po_user_id) DO UPDATE SET points = excluded.points, comment = excluded.comment, updated_at = excluded.updated_at`)
-      .run(c.id, user.id, po, checkPoints(c, b.points), String(b.comment || '').slice(0, 2000), Date.now());
+      .run(c.id, user.id, po, checkPoints(c, b.points), String(b.comment || '').slice(0, 2000), now());
     return { ok: true };
   }));
   app.put('/api/chambers/:id/rankings', wrap((req) => {
@@ -736,7 +767,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
   app.post('/api/chambers/:id/ballot/submit', wrap((req) => {
     const { c, user } = loadChamber(req, 'judge');
     if (!q('SELECT 1 FROM rankings WHERE chamber_id = ? AND judge_id = ?').get(c.id, user.id)) throw bad('Save your ranking before submitting.');
-    upsertBallot(c, user.id, { submitted_at: Date.now() });
+    upsertBallot(c, user.id, { submitted_at: now() });
     return done(c);
   }));
   app.post('/api/chambers/:id/ballots/:jid/reopen', wrap((req) => {
@@ -788,7 +819,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     if (c.floor_mode !== 'self') throw bad('The presiding officer runs the floor in this chamber. An admin can switch it to "Each person tracks for themselves" in Setup.');
     const f = logFields(c, req.body || {});
     const r = q('INSERT INTO speeches (chamber_id, legislation_id, topic, speaker_id, side, recognized_at, duration_seconds, logged_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(c.id, f.legislation_id, f.topic, f.speaker_id, f.side, Date.now(), f.duration_seconds, user.id);
+      .run(c.id, f.legislation_id, f.topic, f.speaker_id, f.side, now(), f.duration_seconds, user.id);
     return { ok: true, speech_id: Number(r.lastInsertRowid) };
   }));
   app.put('/api/chambers/:id/my-log/:sid', wrap((req) => {
@@ -815,7 +846,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     const uid = Number((req.body || {}).questioner_id);
     if (!q(`SELECT 1 FROM chamber_members m JOIN users u ON u.id = m.user_id WHERE m.chamber_id = ? AND u.id = ? AND u.role = 'competitor'`).get(c.id, uid)) throw bad('Pick a competitor in this chamber.');
     if (uid === s.speaker_id) throw bad('The speaker cannot question themselves.');
-    const r = q('INSERT INTO questions (chamber_id, speech_id, questioner_id, asked_at, logged_by) VALUES (?, ?, ?, ?, ?)').run(c.id, s.id, uid, Date.now(), user.id);
+    const r = q('INSERT INTO questions (chamber_id, speech_id, questioner_id, asked_at, logged_by) VALUES (?, ?, ?, ?, ?)').run(c.id, s.id, uid, now(), user.id);
     return { ok: true, question_id: Number(r.lastInsertRowid) };
   }));
   app.delete('/api/chambers/:id/my-questions/:qid', wrap((req) => {
@@ -839,7 +870,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     }
     q(`INSERT INTO question_scores (question_id, scorer_id, points, comment, updated_at) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (question_id, scorer_id) DO UPDATE SET points = excluded.points, comment = excluded.comment, updated_at = excluded.updated_at`)
-      .run(x.id, user.id, checkPoints(c, b.points), String(b.comment || '').slice(0, 2000), Date.now());
+      .run(x.id, user.id, checkPoints(c, b.points), String(b.comment || '').slice(0, 2000), now());
     return { ok: true };
   }));
 
@@ -856,7 +887,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     }
     q(`INSERT INTO practice_scores (speech_id, user_id, points, comment, updated_at) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (speech_id, user_id) DO UPDATE SET points = excluded.points, comment = excluded.comment, updated_at = excluded.updated_at`)
-      .run(s.id, user.id, checkPoints(c, b.points), String(b.comment || '').slice(0, 2000), Date.now());
+      .run(s.id, user.id, checkPoints(c, b.points), String(b.comment || '').slice(0, 2000), now());
     return { ok: true };
   }));
   app.put('/api/chambers/:id/practice/rankings', wrap((req) => {
@@ -1188,7 +1219,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
   app.post('/api/trackers', wrap((req) => {
     const u = requireUser(req);
     const name = String((req.body || {}).name || '').trim().slice(0, 100) || 'My chamber';
-    const r = q('INSERT INTO trackers (owner_id, name, data, updated_at) VALUES (?, ?, ?, ?)').run(u.id, name, '{}', Date.now());
+    const r = q('INSERT INTO trackers (owner_id, name, data, updated_at) VALUES (?, ?, ?, ?)').run(u.id, name, '{}', now());
     return { id: Number(r.lastInsertRowid) };
   }));
   app.get('/api/trackers/:tid', wrap((req) => {
@@ -1201,7 +1232,7 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     const data = b.data === undefined ? t.data : JSON.stringify(b.data);
     if (data.length > 500000) throw bad('This tracker is too large.');
     const name = b.name === undefined ? t.name : (String(b.name).trim().slice(0, 100) || t.name);
-    q('UPDATE trackers SET name = ?, data = ?, updated_at = ? WHERE id = ?').run(name, data, Date.now(), t.id);
+    q('UPDATE trackers SET name = ?, data = ?, updated_at = ? WHERE id = ?').run(name, data, now(), t.id);
     return { ok: true };
   }));
   app.delete('/api/trackers/:tid', wrap((req) => {
@@ -1220,13 +1251,20 @@ function createApp(db, { publicDir = path.join(__dirname, '..', 'public') } = {}
     req.on('close', () => listeners.get(id)?.delete(res));
   });
 
-  require('./teams')(app, { db, q, tx, wrap, requireUser, bad, forbidden, notFound, hashPassword, startSession, makeUsername });
+  require('./teams')(app, { db, q, tx, wrap, requireUser, bad, forbidden, notFound, hashPassword, startSession, makeUsername, now });
+  // Restoring: close the database, let open() swap in the staged file, and carry on with the restored data.
+  function reopen() {
+    db.close();
+    db = require('./db').open(dbFile);
+    require('./teams').schema(db);
+  }
+  const backups = require('./backup')(app, { getDb: () => db, q, wrap, requireAdmin, bad, notFound, dbFile, backupDir, reopen });
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
   app.use(express.static(publicDir));
   app.get('*', (_req, res) => res.sendFile(path.join(publicDir, 'index.html')));
 
-  app.locals.close = () => clearInterval(heartbeat);
+  app.locals.close = () => { clearInterval(heartbeat); backups.stop(); };
   return app;
 }
 

@@ -27,20 +27,21 @@ function toast(msg, isError) {
   clearTimeout(toast._t); toast._t = setTimeout(() => { t.hidden = true; }, isError ? 4500 : 2200);
 }
 async function api(method, url, body) {
-  const headers = body ? { 'Content-Type': 'application/json' } : {};
   // Admins in a mock tournament can act as one of its made-up people.
-  if (ui.viewAs && chamberId && url.startsWith(`/api/chambers/${chamberId}/`)) headers['X-View-As'] = String(ui.viewAs);
-  const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
-  const data = res.headers.get('content-type')?.includes('json') ? await res.json() : null;
-  if (res.status === 401 && !url.startsWith('/api/login')) { me = null; go('#/login'); throw new Error('Please sign in.'); }
-  if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
-  return data;
+  const viewAs = ui.viewAs && chamberId && url.startsWith(`/api/chambers/${chamberId}/`) ? ui.viewAs : null;
+  try {
+    return method === 'GET' ? await Offline.get(url, viewAs) : await Offline.write(method, url, body, viewAs);
+  } catch (e) {
+    if (e.status === 401 && !url.startsWith('/api/login')) { me = null; go('#/login'); throw new Error('Please sign in.'); }
+    throw e;
+  }
 }
 // Run an action, report errors, refresh chamber state.
 async function act(method, url, body, okMsg) {
   try {
     const r = await api(method, url, body);
-    if (okMsg) toast(okMsg);
+    if (r?.queued) toast(`${okMsg || 'Saved'} on this device. It sends when you are back online.`);
+    else if (okMsg) toast(okMsg);
     if (chamberId) await loadState();
     return r;
   } catch (e) { toast(e.message, true); return null; }
@@ -75,6 +76,7 @@ async function route() {
   tracker = null;
   if (parts[0] === 'tracker') return renderTrackerList();
   if (parts[0] === 'users' && me.role === 'admin') return renderUsers();
+  if (parts[0] === 'data' && me.role === 'admin') return renderData();
   if (parts[0] === 'signup') return renderTeams();
   if (parts[0] === 'teams') return renderTeams();
   if (parts[0] === 'team' && parts[1]) return renderTeam(Number(parts[1]), parts[2] || 'research', parts[3], parts[4]);
@@ -84,10 +86,11 @@ async function route() {
 function currentTab() { const t = location.hash.split('/')[3] || ''; return TAB_ALIAS[t] || t; }
 
 function renderWho() {
+  Offline.banner();
   const nav = document.getElementById('mainnav');
   const here = location.hash.replace(/^#\/?/, '').split('/')[0];
   const sec = ['c', ''].includes(here) ? 'home' : (['team', 'teams', 'signup'].includes(here) ? 'teams' : here);
-  const links = me ? [['home', '#/', 'Chambers'], ['teams', '#/teams', 'Teams'], ['tracker', '#/tracker', 'Tracker'], ...(me.role === 'admin' ? [['users', '#/users', 'People']] : [])] : [];
+  const links = me ? [['home', '#/', 'Chambers'], ['teams', '#/teams', 'Teams'], ['tracker', '#/tracker', 'Tracker'], ...(me.role === 'admin' ? [['users', '#/users', 'People'], ['data', '#/data', 'Data']] : [])] : [];
   if (nav) nav.innerHTML = links.map(([k, h, l]) => `<a href="${h}" class="${sec === k ? 'active' : ''}">${l}</a>`).join('');
   $who.innerHTML = me
     ? `<a href="#/account" class="me-chip" title="Account and password"><span class="avatar">${esc((me.display_name || '?').trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase())}</span><span class="me-name">${esc(me.display_name)}<small>${esc(me.role)}</small></span></a><button class="ghost sm" data-act="logout">Sign out</button>`
@@ -100,12 +103,13 @@ function openEvents() {
   events = new EventSource(C('/events'));
   events.addEventListener('changed', () => loadState());
 }
+Offline.hooks.synced = () => { if (chamberId) loadState(); };
 function closeEvents() { if (events) { events.close(); events = null; } }
 async function loadState() {
   if (!chamberId) return;
   try {
     const s = await api('GET', C('/state'));
-    clockOffset = s.server_now - Date.now();
+    if (!s._offline) clockOffset = s.server_now - Date.now();
     state = s;
     const savedRanks = state.my_rankings || state.my_practice_rankings;
     if (ui.rankDraft === null && savedRanks?.length) ui.rankDraft = [...savedRanks];
@@ -209,6 +213,43 @@ async function renderHome() {
 }
 
 // ---------- users (admin) ----------
+// ---------- data & backups (admins) ----------
+const fmtBytes = (n) => (n == null ? '?' : n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : n < 1024 ** 3 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(2)} GB`);
+const BACKUP_REASON = { daily: 'Daily', manual: 'Made by hand', 'pre-restore': 'Before a restore', upload: 'Uploaded' };
+async function renderData() {
+  let b;
+  try { b = await api('GET', '/api/admin/backups'); } catch (e) { $view.innerHTML = `<div class="card"><p>${esc(e.message)}</p></div>`; return; }
+  const used = b.disk ? b.disk.total - b.disk.free : null;
+  $view.innerHTML = `
+    <div class="page-head"><div><h1>Data &amp; backups</h1><p class="muted" style="margin:0">Copies of everything in the app, kept on the server and ready to download.</p></div></div>
+    ${b._offline ? '<div class="banner recess">You are offline. This list is from the last time you were connected.</div>' : ''}
+    <div class="grid two">
+      <div class="card stack">
+        <h2>Save a copy</h2>
+        <p class="small muted" style="margin:0">The app backs itself up once a day when something changed and keeps ${b.keep_days} days of copies (always at least the last five). Before a tournament, make one by hand and download it to your own computer.</p>
+        <div class="row"><button class="primary" data-act="backup-now">Back up now</button><a class="btn" href="/api/admin/export.zip">Export everything (spreadsheets)</a></div>
+        <p class="small muted" style="margin:0">The export is a zip with one spreadsheet per table, for Excel or Google Sheets. Passwords, private speech plans, notes, trackers and practice ballots stay out of it; they are only in the full backups.</p>
+      </div>
+      <div class="card stack">
+        <h2>Storage</h2>
+        <div class="spread small"><span>Database</span><strong>${fmtBytes(b.db_bytes)}</strong></div>
+        <div class="spread small"><span>Backups (${b.backups.length})</span><strong>${fmtBytes(b.total_bytes)}</strong></div>
+        ${b.disk ? `<div class="spread small"><span>Disk used</span><strong>${fmtBytes(used)} of ${fmtBytes(b.disk.total)}</strong></div><div class="meter" aria-hidden="true"><span style="width:${Math.min(100, Math.round((used / b.disk.total) * 100))}%"></span></div>` : ''}
+      </div>
+    </div>
+    <div class="card">
+      <h2>Backups</h2>
+      ${b.backups.length ? `<div class="table-wrap"><table><thead><tr><th>When</th><th>Kind</th><th>Size</th><th></th></tr></thead><tbody>
+        ${b.backups.map((x) => `<tr><td>${esc(new Date(x.created_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }))}</td><td>${esc(BACKUP_REASON[x.reason] || x.reason)}</td><td>${fmtBytes(x.size)}</td>
+          <td class="row" style="justify-content:flex-end"><a class="btn sm" href="/api/admin/backups/${encodeURIComponent(x.name)}">Download</a>${b.can_restore ? `<button class="sm ghost" data-act="restore" data-name="${esc(x.name)}" data-when="${esc(new Date(x.created_at).toLocaleString())}">Restore</button>` : ''}</td></tr>`).join('')}
+      </tbody></table></div>` : '<p class="muted">No backups yet. The first daily copy is made a few minutes after the app starts.</p>'}
+    </div>
+    ${b.can_restore ? `<div class="card stack">
+      <h2>Restore from a file</h2>
+      <p class="small muted" style="margin:0">Pick a backup you downloaded earlier (a .db.gz file). Everything in the app is replaced with what is in that file. A copy of the current data is saved first, so a restore can be undone.</p>
+      <div class="row"><input type="file" id="restore-file" accept=".gz,.db,application/gzip" style="max-width:340px"><button class="ghost" data-act="restore-upload">Restore this file</button></div>
+    </div>` : ''}`;
+}
 async function renderUsers() {
   const { users } = await api('GET', '/api/users');
   const flash = ui.userFlash; ui.userFlash = null;
@@ -1345,7 +1386,39 @@ document.addEventListener('click', async (e) => {
   if (!b) return;
   const d = b.dataset, s = state;
   switch (d.act) {
-    case 'logout': await api('POST', '/api/logout'); me = null; closeEvents(); chamberId = null; state = null; go('#/login'); break;
+    case 'logout': {
+      const n = Offline.pending();
+      if (n && !confirm(`${n} change${n === 1 ? ' has' : 's have'} not reached the server yet. They stay on this device and send the next time you sign in here. Sign out anyway?`)) break;
+      try { await api('POST', '/api/logout'); } catch (err) { toast(err.message, true); break; }
+      await Offline.clearSaved(); me = null; closeEvents(); chamberId = null; state = null; go('#/login'); break;
+    }
+    case 'backup-now': {
+      b.disabled = true;
+      try { await api('POST', '/api/admin/backups'); toast('Backup saved'); renderData(); } catch (err) { toast(err.message, true); b.disabled = false; }
+      break;
+    }
+    case 'restore': {
+      if (!confirm(`Replace everything in the app with the backup from ${d.when}? Anything added since then is replaced. A copy of the current data is saved first.`)) break;
+      try { await api('POST', '/api/admin/restore', { name: d.name }); toast('Restored'); me = null; go('#/data'); } catch (err) { toast(err.message, true); }
+      break;
+    }
+    case 'restore-upload': {
+      const file = document.getElementById('restore-file')?.files?.[0];
+      if (!file) { toast('Pick a backup file first.', true); break; }
+      if (!confirm(`Replace everything in the app with "${file.name}"? A copy of the current data is saved first.`)) break;
+      b.disabled = true;
+      try {
+        const res = await fetch('/api/admin/restore', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file });
+        const r = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(r.error || `Restore failed (${res.status})`);
+        toast('Restored'); me = null; go('#/data');
+      } catch (err) { toast(err.message === 'Failed to fetch' ? 'You are offline. This needs a connection.' : err.message, true); b.disabled = false; }
+      break;
+    }
+    case 'net-open': { const p = document.getElementById('netpanel'); p.innerHTML = Offline.panel(); p.hidden = false; break; }
+    case 'net-close': document.getElementById('netpanel').hidden = true; break;
+    case 'net-retry': await Offline.flush(); document.getElementById('netpanel').innerHTML = Offline.panel(); break;
+    case 'net-dismiss': Offline.dismiss(); document.getElementById('netpanel').innerHTML = Offline.panel(); break;
     case 'reset-pw': if (confirm(`Reset the password for ${d.name}?`)) { const r = await api('PUT', `/api/users/${d.id}`, { reset_password: true }); ui.userFlash = [{ display_name: d.name, role: '', username: '(unchanged)', password: r.password }]; renderUsers(); } break;
     case 'delete-user': if (confirm(`Delete ${d.name}? Their speeches and scores are removed too.`)) { await api('DELETE', `/api/users/${d.id}`); allUsersCache = null; renderUsers(); } break;
     case 'remove-member': await act('DELETE', C(`/members/${d.id}`)); break;

@@ -6,7 +6,15 @@ const { DatabaseSync } = require('node:sqlite');
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'congress.db');
 
 function open(file = DB_PATH) {
-  if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (file !== ':memory:') {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    // A restore staged by an admin (see backup.js) is swapped in before the database opens.
+    const staged = `${file}.restore`;
+    if (fs.existsSync(staged)) {
+      for (const f of [file, `${file}-wal`, `${file}-shm`]) fs.rmSync(f, { force: true });
+      fs.renameSync(staged, file);
+    }
+  }
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   db.exec(`
@@ -167,6 +175,14 @@ function open(file = DB_PATH) {
       comment TEXT NOT NULL DEFAULT '',
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (speech_id, user_id)
+    );
+    CREATE TABLE IF NOT EXISTS client_ops (
+      op_id TEXT NOT NULL,
+      user_id INTEGER NOT NULL,
+      status INTEGER NOT NULL,
+      body TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (op_id, user_id)
     );
     CREATE TABLE IF NOT EXISTS question_scores (
       question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
