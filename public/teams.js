@@ -157,6 +157,17 @@ function researchLine(b) {
   const bits = [[b.aff, 'aff'], [b.neg, 'neg'], [b.evidence, 'evidence'], [b.questions, b.questions === 1 ? 'question' : 'questions']].filter(([n]) => n);
   return bits.length ? bits.map(([n, l]) => `${n} ${l}`).join(' · ') : '';
 }
+const svg = (d) => `<svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const ICON = {
+  bill: svg('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>'),
+  res: svg('<path d="M4 4h16v12H8l-4 4z"/><path d="M8 9h8M8 12h5"/>'),
+  school: svg('<path d="m3 10 9-5 9 5-9 5z"/><path d="M7 12v4c0 1.5 2.2 3 5 3s5-1.5 5-3v-4"/>'),
+  star: svg('<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z" fill="currentColor"/>'),
+  mic: svg('<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>'),
+  book: svg('<path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19V5M8 7h7"/>'),
+  trophy: svg('<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/>'),
+  gavel: svg('<path d="m14 13-8.5 8.5a2.1 2.1 0 0 1-3-3L11 10"/><path d="m16 16 6-6M8 8l6-6M9 7l8 8M21 11l-8-8"/>'),
+};
 function billsCard(bills, adding) {
   const counts = { current: bills.filter((b) => b.status === 'current').length, all: bills.filter((b) => b.status !== 'archived').length, archived: bills.filter((b) => b.status === 'archived').length };
   const f = ui.billFilter && (counts[ui.billFilter] || ui.billFilter === 'all') ? ui.billFilter : (counts.current ? 'current' : 'all');
@@ -173,35 +184,45 @@ function billsCard(bills, adding) {
     const m = billMeta(b), t = m.tourn || 'Other bills';
     let g = groups.find((x) => x.t === t); if (!g) groups.push(g = { t, sessions: [] });
     let ss = g.sessions.find((x) => x.s === m.session); if (!ss) g.sessions.push(ss = { s: m.session, bills: [] });
-    ss.bills.push({ b, m });
+    ss.bills.push({ b, m, n: ss.bills.length + 1 });
   }
   const leaderDel = leader;
   const READY = [['aff', 'Aff'], ['neg', 'Neg'], ['evidence', 'Evidence'], ['questions', 'Questions']];
   const planBtn = (b, side) => {
     const p = (b.my_plans || []).find((x) => x.side === side);
     const label = side === 'aff' ? 'Aff' : 'Neg';
-    return p ? `<a class="btn sm plan-chip ${side}" href="#/team/${teamCtx.id}/plan/${p.id}" title="Your ${label.toLowerCase()} speech">${label} · ${esc(STATUS_LABEL_PLAN[p.status] || p.status)}</a>`
-      : `<button class="sm" data-tact="plan-from-bill" data-side="${side}" data-bill="${b.id}" data-title="${esc(b.title)}">+ ${label}<span class="wide-only">&nbsp;speech</span></button>`;
+    return p ? `<a class="btn sm plan-chip ${side}" href="#/team/${teamCtx.id}/plan/${p.id}" title="Your ${label.toLowerCase()} speech">${ICON.mic}${label} · ${esc(STATUS_LABEL_PLAN[p.status] || p.status)}</a>`
+      : `<button class="sm" data-tact="plan-from-bill" data-side="${side}" data-bill="${b.id}" data-title="${esc(b.title)}">${ICON.mic}${label}<span class="wide-only">&nbsp;speech</span></button>`;
   };
-  const row = ({ b, m }) => `<article class="bill-card${b.status === 'current' ? ' is-current' : ''}${sel.includes(b.id) ? ' picked' : ''}">
+  const score = (b) => READY.filter(([k]) => b[k]).length;
+  const stage = (n) => (n === 4 ? ['done', 'Researched'] : n ? ['mid', 'In progress'] : ['none', 'Not started']);
+  const row = ({ b, m, n }) => {
+    const sc = score(b), [st, stl] = stage(sc), res = b.kind === 'resolution';
+    return `<article class="bill-card kind-${res ? 'resolution' : 'bill'} stage-${st}${b.status === 'current' ? ' is-current' : ''}${b.status === 'archived' ? ' is-archived' : ''}${sel.includes(b.id) ? ' picked' : ''}">
       <div class="bc-top">
         <input type="checkbox" data-bill-sel="${b.id}" ${sel.includes(b.id) ? 'checked' : ''} aria-label="Select ${esc(b.title)}">
+        <div class="bc-num" title="Docket position ${n}"><small>${res ? 'Res' : 'Bill'}</small>${n}</div>
         <div class="bc-main">
-          <div class="bc-kicker">${b.kind === 'resolution' ? 'Resolution' : 'Bill'}${m.school ? ` · ${esc(m.school)}` : ''}${b.status === 'current' ? ' <span class="pill now-pill">Current</span>' : ''}${b.status === 'archived' ? ' <span class="pill">Archived</span>' : ''}</div>
+          <div class="bc-kicker"><span class="type-badge ${res ? 'resolution' : 'bill'}">${res ? ICON.res : ICON.bill}${res ? 'Resolution' : 'Bill'}</span>${m.school ? `<span class="bc-school">${ICON.school}${esc(m.school)}</span>` : ''}${b.status === 'current' ? `<span class="pill now-pill">${ICON.star}Up next</span>` : ''}${b.status === 'archived' ? '<span class="pill">Archived</span>' : ''}</div>
           <a class="bc-title" href="#/team/${teamCtx.id}/bill/${b.id}">${esc(b.title)}</a>
           ${b.preview ? `<p class="bc-preview">${esc(b.preview)}</p>` : ''}
         </div>
-        <details class="bc-menu"><summary aria-label="More for this bill">⋯</summary><div class="bc-pop">
-          ${b.status === 'archived' ? `<button data-tact="bill-status" data-a="restore" data-id="${b.id}">Restore</button>`
-            : `${b.status === 'current' ? `<button data-tact="bill-status" data-a="clear" data-id="${b.id}">Unmark current</button>` : `<button data-tact="bill-status" data-a="current" data-id="${b.id}">Mark current</button>`}<button data-tact="bill-status" data-a="archive" data-id="${b.id}">Archive</button>`}
-          ${leaderDel ? `<button class="danger" data-tact="bill-del" data-id="${b.id}" data-title="${esc(b.title)}">Delete…</button>` : ''}
-        </div></details>
+        <div class="bc-side">
+          <details class="bc-menu"><summary aria-label="More for this bill">⋯</summary><div class="bc-pop">
+            ${b.status === 'archived' ? `<button data-tact="bill-status" data-a="restore" data-id="${b.id}">Restore</button>`
+              : `${b.status === 'current' ? `<button data-tact="bill-status" data-a="clear" data-id="${b.id}">Unmark current</button>` : `<button data-tact="bill-status" data-a="current" data-id="${b.id}">Mark current</button>`}<button data-tact="bill-status" data-a="archive" data-id="${b.id}">Archive</button>`}
+            ${leaderDel ? `<button class="danger" data-tact="bill-del" data-id="${b.id}" data-title="${esc(b.title)}">Delete…</button>` : ''}
+          </div></details>
+          <span class="rd-badge rd-${st}" title="${sc} of 4 research areas started"><span class="pips">${READY.map(([k]) => `<i class="${b[k] ? 'on' : ''}"></i>`).join('')}</span>${stl}</span>
+        </div>
       </div>
       <div class="bc-foot">
         <a class="ready" href="#/team/${teamCtx.id}/bill/${b.id}" title="Team research on this bill">${READY.map(([k, l]) => `<span class="seg-${k}${b[k] ? ' on' : ''}"><b>${b[k] || 0}</b> ${l}</span>`).join('')}</a>
-        <div class="bc-actions">${planBtn(b, 'aff')}${planBtn(b, 'neg')}<a class="btn sm ghost" href="#/team/${teamCtx.id}/bill/${b.id}">+ Research</a></div>
+        <div class="bc-actions">${planBtn(b, 'aff')}${planBtn(b, 'neg')}<a class="btn sm ghost" href="#/team/${teamCtx.id}/bill/${b.id}">${ICON.book}Research</a></div>
       </div>
     </article>`;
+  };
+  const stats = (bs) => { const started = bs.filter((x) => score(x.b)).length; const pct = bs.length ? Math.round(bs.reduce((a, x) => a + score(x.b), 0) / (bs.length * 4) * 100) : 0; return { n: bs.length, cur: bs.filter((x) => x.b.status === 'current').length, started, pct }; };
   const tabs = [['current', 'Current'], ['all', 'All'], ['archived', 'Archived']];
   return `<div class="card bills-card">
     <div class="bills-head">
@@ -218,8 +239,12 @@ function billsCard(bills, adding) {
         : `<button class="sm" data-tact="bill-bulk" data-a="current">Mark current</button>${list.some((b) => sel.includes(b.id) && b.status === 'current') ? '<button class="sm" data-tact="bill-bulk" data-a="clear">Unmark current</button>' : ''}<button class="sm" data-tact="bill-bulk" data-a="archive">Archive</button>`}
         ${leader ? '<button class="sm danger-ghost" data-tact="bill-bulk" data-a="delete">Delete</button>' : ''}` : ''}
     </div>
-    ${groups.map((g) => `<section class="bill-group">${groups.length > 1 || g.t !== 'Other bills' ? `<h3 class="group-title">${esc(g.t)} <span class="muted">${g.sessions.reduce((a, x) => a + x.bills.length, 0)}</span></h3>` : ''}
-      ${g.sessions.map((ss) => `${ss.s ? `<div class="session-title">${esc(ss.s)}</div>` : ''}<div class="bill-cards">${ss.bills.map(row).join('')}</div>`).join('')}</section>`).join('')}`
+    ${groups.map((g) => { const all = g.sessions.flatMap((x) => x.bills), gs = stats(all); return `<section class="bill-group">${groups.length > 1 || g.t !== 'Other bills' ? `<header class="tourn-banner">
+        <div class="tb-name"><span class="tb-icon">${ICON.trophy}</span><div><span class="eyebrow">Tournament</span><h3>${esc(g.t)}</h3></div></div>
+        <div class="tb-stats"><span><b>${gs.n}</b> ${gs.n === 1 ? 'item' : 'items'}</span>${gs.cur ? `<span class="tb-cur"><b>${gs.cur}</b> up next</span>` : ''}<span><b>${gs.started}</b> started</span></div>
+        <div class="tb-meter" title="Research coverage across this tournament"><span style="width:${gs.pct}%"></span><em>${gs.pct}% researched</em></div>
+      </header>` : ''}
+      ${g.sessions.map((ss) => { const s2 = stats(ss.bills); return `${ss.s ? `<div class="session-band"><span class="sb-name">${ICON.gavel}${esc(ss.s)}</span><span class="sb-count">${s2.n}</span><span class="sb-prog">${s2.started} of ${s2.n} started</span></div>` : ''}<div class="bill-cards">${ss.bills.map(row).join('')}</div>`; }).join('')}</section>`; }).join('')}`
     : `<p class="muted">${!bills.length ? 'No bills yet. Import a tournament packet below, or add one by hand.' : f === 'current' ? 'No bills are marked current. Open All, tick the bills for your next tournament, and tap Mark current.' : f === 'archived' ? 'Nothing archived.' : 'Every bill is archived. Open Archived to bring some back.'}</p>`}
   </div>`;
 }
