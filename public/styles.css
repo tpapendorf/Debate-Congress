@@ -323,3 +323,10 @@ body.in-chamber .toast { bottom: 90px; }
 .packet-item.off { opacity: .55; }
 .packet-session { font: 700 12px/1 var(--text); text-transform: uppercase; letter-spacing: .6px; color: var(--muted); padding-top: 12px; border: 0; }
 .packet details summary { cursor: pointer; }
+
+/* ---------- managing team bills ---------- */
+.bulkbar { gap: 8px; padding: 8px 10px; margin: 10px 0 4px; background: var(--soft); border: 1px solid var(--line); border-radius: 10px; min-height: 48px; }
+.bill-list li.is-current { box-shadow: inset 3px 0 0 var(--gold); padding-left: 10px; }
+button.danger-ghost { color: var(--neg); border-color: color-mix(in srgb, var(--neg) 40%, var(--line)); }
+.bills-card .seg .muted { font-weight: 500; }
+.bills-card .seg button.on .muted { color: rgba(255, 255, 255, .75); }

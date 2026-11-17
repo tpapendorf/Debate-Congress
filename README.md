@@ -71,6 +71,10 @@ When the presiding officer isn't running the round in this app, an admin sets **
 
 Tournaments post their Congress legislation as a PDF or Word packet on Tabroom. On a team's **Research** tab (or a chamber's **Docket** tab, for admins), paste the tournament's Tabroom page or a link to the packet, or upload the file. The app finds each bill and resolution with its session, author and full text, shows a preview where titles can be fixed and items unticked, and imports what is picked. Google Docs share links work too when the doc is shared publicly. Scanned packets (images of text) cannot be read.
 
+### Managing the bill library
+
+The Research tab lists bills under **Current**, **All** and **Archived**, with a tournament filter once there is more than one. Tick bills (or Select all) to **Mark current** for an upcoming tournament, **Archive** old ones (hidden from the list and from speech-plan menus, research kept), **Restore** them, or **Delete** them for good (coaches and captains only). A single bill's page has the same Mark current and Archive buttons.
+
 ## Working without Wi-Fi
 
 Every page you open is kept on that device, so the app still opens and shows your chamber, ballot, team research, speech plans and notes when the connection drops.
