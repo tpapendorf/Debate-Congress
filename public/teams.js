@@ -175,14 +175,33 @@ function billsCard(bills, adding) {
     let ss = g.sessions.find((x) => x.s === m.session); if (!ss) g.sessions.push(ss = { s: m.session, bills: [] });
     ss.bills.push({ b, m });
   }
-  const row = ({ b, m }) => {
-    const r = researchLine(b);
-    return `<li class="bill-row${b.status === 'current' ? ' is-current' : ''}${sel.includes(b.id) ? ' picked' : ''}">
-      <input type="checkbox" data-bill-sel="${b.id}" ${sel.includes(b.id) ? 'checked' : ''} aria-label="Select ${esc(b.title)}">
-      <a class="bill-title" href="#/team/${teamCtx.id}/bill/${b.id}">${esc(b.title)}</a>
-      <span class="bill-meta">${b.status === 'current' && f !== 'current' ? '<span class="pill now-pill">Current</span>' : ''}${m.school ? `<span class="muted">${esc(m.school)}</span>` : ''}${r ? `<span class="research">${esc(r)}</span>` : ''}</span>
-    </li>`;
+  const leaderDel = leader;
+  const READY = [['aff', 'Aff'], ['neg', 'Neg'], ['evidence', 'Evidence'], ['questions', 'Questions']];
+  const planBtn = (b, side) => {
+    const p = (b.my_plans || []).find((x) => x.side === side);
+    const label = side === 'aff' ? 'Aff' : 'Neg';
+    return p ? `<a class="btn sm plan-chip ${side}" href="#/team/${teamCtx.id}/plan/${p.id}" title="Your ${label.toLowerCase()} speech">${label} · ${esc(STATUS_LABEL_PLAN[p.status] || p.status)}</a>`
+      : `<button class="sm" data-tact="plan-from-bill" data-side="${side}" data-bill="${b.id}" data-title="${esc(b.title)}">+ ${label}<span class="wide-only">&nbsp;speech</span></button>`;
   };
+  const row = ({ b, m }) => `<article class="bill-card${b.status === 'current' ? ' is-current' : ''}${sel.includes(b.id) ? ' picked' : ''}">
+      <div class="bc-top">
+        <input type="checkbox" data-bill-sel="${b.id}" ${sel.includes(b.id) ? 'checked' : ''} aria-label="Select ${esc(b.title)}">
+        <div class="bc-main">
+          <div class="bc-kicker">${b.kind === 'resolution' ? 'Resolution' : 'Bill'}${m.school ? ` · ${esc(m.school)}` : ''}${b.status === 'current' ? ' <span class="pill now-pill">Current</span>' : ''}${b.status === 'archived' ? ' <span class="pill">Archived</span>' : ''}</div>
+          <a class="bc-title" href="#/team/${teamCtx.id}/bill/${b.id}">${esc(b.title)}</a>
+          ${b.preview ? `<p class="bc-preview">${esc(b.preview)}</p>` : ''}
+        </div>
+        <details class="bc-menu"><summary aria-label="More for this bill">⋯</summary><div class="bc-pop">
+          ${b.status === 'archived' ? `<button data-tact="bill-status" data-a="restore" data-id="${b.id}">Restore</button>`
+            : `${b.status === 'current' ? `<button data-tact="bill-status" data-a="clear" data-id="${b.id}">Unmark current</button>` : `<button data-tact="bill-status" data-a="current" data-id="${b.id}">Mark current</button>`}<button data-tact="bill-status" data-a="archive" data-id="${b.id}">Archive</button>`}
+          ${leaderDel ? `<button class="danger" data-tact="bill-del" data-id="${b.id}" data-title="${esc(b.title)}">Delete…</button>` : ''}
+        </div></details>
+      </div>
+      <div class="bc-foot">
+        <a class="ready" href="#/team/${teamCtx.id}/bill/${b.id}" title="Team research on this bill">${READY.map(([k, l]) => `<span class="seg-${k}${b[k] ? ' on' : ''}"><b>${b[k] || 0}</b> ${l}</span>`).join('')}</a>
+        <div class="bc-actions">${planBtn(b, 'aff')}${planBtn(b, 'neg')}<a class="btn sm ghost" href="#/team/${teamCtx.id}/bill/${b.id}">+ Research</a></div>
+      </div>
+    </article>`;
   const tabs = [['current', 'Current'], ['all', 'All'], ['archived', 'Archived']];
   return `<div class="card bills-card">
     <div class="bills-head">
@@ -200,7 +219,7 @@ function billsCard(bills, adding) {
         ${leader ? '<button class="sm danger-ghost" data-tact="bill-bulk" data-a="delete">Delete</button>' : ''}` : ''}
     </div>
     ${groups.map((g) => `<section class="bill-group">${groups.length > 1 || g.t !== 'Other bills' ? `<h3 class="group-title">${esc(g.t)} <span class="muted">${g.sessions.reduce((a, x) => a + x.bills.length, 0)}</span></h3>` : ''}
-      ${g.sessions.map((ss) => `${ss.s ? `<div class="session-title">${esc(ss.s)}</div>` : ''}<ul class="bill-rows">${ss.bills.map(row).join('')}</ul>`).join('')}</section>`).join('')}`
+      ${g.sessions.map((ss) => `${ss.s ? `<div class="session-title">${esc(ss.s)}</div>` : ''}<div class="bill-cards">${ss.bills.map(row).join('')}</div>`).join('')}</section>`).join('')}`
     : `<p class="muted">${!bills.length ? 'No bills yet. Import a tournament packet below, or add one by hand.' : f === 'current' ? 'No bills are marked current. Open All, tick the bills for your next tournament, and tap Mark current.' : f === 'archived' ? 'Nothing archived.' : 'Every bill is archived. Open Archived to bring some back.'}</p>`}
   </div>`;
 }
@@ -518,6 +537,7 @@ document.addEventListener('click', async (e) => {
         toast({ current: 'Marked current', clear: 'No longer current', archive: 'Archived', restore: 'Restored', delete: 'Deleted' }[d.a] + ` (${ids.length})`);
         ui.billSel = []; reTeam(); break;
       }
+      case 'bill-del': if (confirm(`Delete "${d.title}" and all of its research for the whole team? Archive keeps it instead.`)) { await api('POST', T('/bills/bulk'), { ids: [Number(d.id)], action: 'delete' }); toast('Deleted'); reTeam(); } break;
       case 'bill-status': await api('POST', T('/bills/bulk'), { ids: [Number(d.id)], action: d.a }); toast({ current: 'Marked current', clear: 'No longer current', archive: 'Archived', restore: 'Restored' }[d.a]); reTeam(); break;
       case 'autofill': {
         const f = b.closest('form'), msg = f.querySelector('[data-cite-msg]'), url = f.cite_url.value.trim();
@@ -669,4 +689,9 @@ document.addEventListener('change', (e) => {
   if (!packetState?.items) return;
   if (el.dataset.pkOn) { packetState.items[Number(el.dataset.pkOn)].on = el.checked; renderPacket(packetBox(el)); }
   else if (el.dataset.pkKind) packetState.items[Number(el.dataset.pkKind)].kind = el.value;
+});
+
+// Close an open bill-card menu when tapping anywhere else.
+document.addEventListener('click', (e) => {
+  for (const m of document.querySelectorAll('details.bc-menu[open]')) if (!m.contains(e.target) || e.target.closest('.bc-pop button')) m.open = false;
 });
