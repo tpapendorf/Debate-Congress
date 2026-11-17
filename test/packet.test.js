@@ -125,3 +125,45 @@ RESOLVED, That teachers are honored.`);
   ]);
   assert.equal(items[0].author, 'Central High School');
 });
+
+test('team bills can be flagged current, archived, restored and deleted in bulk', async () => {
+  const app = createApp(open(':memory:'));
+  const server = app.listen(0);
+  await new Promise((r) => server.once('listening', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const mk = () => {
+    let cookie = '';
+    return async (method, p, body) => {
+      const res = await fetch(base + p, { method, headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
+      const set = res.headers.get('set-cookie'); if (set) cookie = set.split(';')[0];
+      return { status: res.status, data: await res.json() };
+    };
+  };
+  try {
+    const coach = mk();
+    await coach('POST', '/api/setup', { username: 'admin', display_name: 'Coach', password: 'secret1' });
+    const team = (await coach('POST', '/api/teams', { name: 'T' })).data;
+    const ids = [];
+    for (const t of ['A Bill One', 'A Bill Two', 'A Bill Three']) ids.push((await coach('POST', `/api/teams/${team.id}/bills`, { title: t })).data.id);
+    const status = async () => Object.fromEntries((await coach('GET', `/api/teams/${team.id}`)).data.bills.map((b) => [b.title, b.status]));
+    assert.equal((await status())['A Bill One'], 'active');
+    await coach('POST', `/api/teams/${team.id}/bills/bulk`, { ids: [ids[0], ids[1]], action: 'current' });
+    await coach('POST', `/api/teams/${team.id}/bills/bulk`, { ids: [ids[2]], action: 'archive' });
+    assert.deepEqual(await status(), { 'A Bill One': 'current', 'A Bill Two': 'current', 'A Bill Three': 'archived' });
+    await coach('POST', `/api/teams/${team.id}/bills/bulk`, { ids: [ids[1]], action: 'clear' });
+    await coach('POST', `/api/teams/${team.id}/bills/bulk`, { ids: [ids[2]], action: 'restore' });
+    assert.deepEqual(await status(), { 'A Bill One': 'current', 'A Bill Two': 'active', 'A Bill Three': 'active' });
+
+    // A regular member can flag but not delete.
+    const { users } = (await coach('POST', '/api/users/bulk', { text: 'Sam S, X' })).data;
+    const sam = mk(); await sam('POST', '/api/login', { username: users[0].username, password: users[0].password });
+    const code = (await coach('GET', `/api/teams/${team.id}`)).data.team.join_code;
+    await sam('POST', '/api/teams/join', { code });
+    await coach('POST', `/api/teams/${team.id}/members/${users[0].id}`, { action: 'approve' });
+    assert.equal((await sam('POST', `/api/teams/${team.id}/bills/bulk`, { ids: [ids[1]], action: 'archive' })).status, 200);
+    assert.equal((await sam('POST', `/api/teams/${team.id}/bills/bulk`, { ids: [ids[1]], action: 'delete' })).status, 403);
+    const del = await coach('POST', `/api/teams/${team.id}/bills/bulk`, { ids: [ids[0], ids[1], 999], action: 'delete' });
+    assert.equal(del.data.changed, 2);
+    assert.deepEqual(Object.keys(await status()), ['A Bill Three']);
+  } finally { app.locals.close(); server.close(); }
+});

@@ -109,6 +109,8 @@ function schema(db) {
   if (!cols.includes('cite_title')) db.exec(`ALTER TABLE bill_items ADD COLUMN cite_title TEXT NOT NULL DEFAULT ''`);
   // An offline edit that crossed someone else's newer edit is saved as a separate copy pointing at the original.
   if (!cols.includes('conflict_of')) db.exec('ALTER TABLE bill_items ADD COLUMN conflict_of INTEGER');
+  // Bills can be flagged as current (on an upcoming docket) or archived (old, hidden from the main list).
+  if (!db.prepare('PRAGMA table_info(team_bills)').all().some((c) => c.name === 'status')) db.exec(`ALTER TABLE team_bills ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`);
 }
 
 // What a link points at, from its address alone (we never need access to the Google file itself).
@@ -310,7 +312,7 @@ module.exports = function mountTeams(app, h) {
     const members = q(`SELECT tm.user_id id, tm.role, tm.status, tm.joined_at, u.display_name name, u.school FROM team_members tm
                        JOIN users u ON u.id = tm.user_id WHERE tm.team_id = ? ORDER BY tm.status DESC, tm.role, u.display_name`).all(team.id)
       .filter((m) => isLeader || m.status === 'active');
-    const bills = q(`SELECT b.id, b.title, b.kind, b.source, b.updated_at,
+    const bills = q(`SELECT b.id, b.title, b.kind, b.source, b.status, b.created_by, b.updated_at,
                        (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'aff') aff,
                        (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'neg') neg,
                        (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'evidence') evidence,
@@ -456,6 +458,26 @@ module.exports = function mountTeams(app, h) {
       .run(str(b.title ?? bill.title, 300) || bill.title, b.kind === 'resolution' ? 'resolution' : (b.kind === 'bill' ? 'bill' : bill.kind),
         str(b.source ?? bill.source, 200), str(b.summary ?? bill.summary), str(b.body ?? bill.body, 50000), now(), bill.id);
     return { ok: true };
+  }));
+  // Flag, archive or delete several bills at once. Any member can flag or archive; deleting is for coaches and captains.
+  app.post('/api/teams/:tid/bills/bulk', wrap((req) => {
+    const b = req.body || {};
+    const action = String(b.action || '');
+    const STATUS = { current: 'current', clear: 'active', archive: 'archived', restore: 'active' };
+    if (!(action in STATUS) && action !== 'delete') throw bad('Unknown action.');
+    const { team } = loadTeam(req, action === 'delete' ? 'leader' : undefined);
+    const ids = [...new Set((Array.isArray(b.ids) ? b.ids : []).map(Number))].filter((x) => x > 0).slice(0, 500);
+    if (!ids.length) throw bad('Pick at least one bill.');
+    let n = 0;
+    tx(() => {
+      for (const id of ids) {
+        const r = action === 'delete'
+          ? q('DELETE FROM team_bills WHERE id = ? AND team_id = ?').run(id, team.id)
+          : q('UPDATE team_bills SET status = ? WHERE id = ? AND team_id = ?').run(STATUS[action], id, team.id);
+        n += Number(r.changes);
+      }
+    });
+    return { ok: true, changed: n };
   }));
   app.delete('/api/teams/:tid/bills/:bid', wrap((req) => {
     const { team } = loadTeam(req, 'leader');
