@@ -470,7 +470,7 @@ module.exports = function mountTeams(app, h) {
     const my_notes = q('SELECT id, title FROM team_notes WHERE bill_id = ? AND user_id = ? ORDER BY updated_at DESC').all(bill.id, user.id);
     const links = q(`SELECT l.*, u.display_name added_by FROM team_links l LEFT JOIN users u ON u.id = l.created_by
                      WHERE l.bill_id = ? ORDER BY l.created_at DESC`).all(bill.id);
-    return { bill, items, my_plans, my_notes, links };
+    return { bill: { ...bill, preview: billPreview(bill.summary, (bill.body || '').slice(0, 1500)) }, items, my_plans, my_notes, links };
   }));
   app.put('/api/teams/:tid/bills/:bid', wrap((req) => {
     const { team } = loadTeam(req);
