@@ -99,3 +99,29 @@ test('uploading a Word packet, then importing into team research and a chamber d
     assert.equal(leg[1].kind, 'resolution');
   } finally { app.locals.close(); server.close(); }
 });
+
+test('table of contents with letters, a Super Congress section, and "Introduced by."', () => {
+  const items = parseText(`Table of Contents
+A A Bill to Fix Roads Central HS
+B The Clean Air Act Central HS
+Supers Legislation
+AA A Resolution to Honor Teachers
+\f
+A
+A Bill to Fix Roads
+BE IT ENACTED BY THE CONGRESS HERE ASSEMBLED THAT:
+SECTION 1. Roads shall be fixed.
+Introduced by. Central High School
+\f
+The Clean Air Act
+BE IT ENACTED BY THE CONGRESS HERE ASSEMBLED THAT:
+SECTION 1. Air shall be clean.
+\f
+A Resolution to Honor Teachers
+WHEREAS, Teachers matter; now, therefore, be it
+RESOLVED, That teachers are honored.`);
+  assert.deepEqual(items.map((x) => [x.title, x.session]), [
+    ['A Bill to Fix Roads', 'Prelims'], ['The Clean Air Act', 'Prelims'], ['A Resolution to Honor Teachers', 'Super Congress'],
+  ]);
+  assert.equal(items[0].author, 'Central High School');
+});
