@@ -67,6 +67,27 @@ When the presiding officer isn't running the round in this app, an admin sets **
 - **Google Docs, Sheets, Slides and Drive folders** can be linked on the Research tab (whole team), on a bill page (that bill), or on a speech plan (just you, plus coaches and captains if you share the plan). The app only stores the link and recognises what kind of Google file it is. Opening it uses each person's own Google account, so share the file or folder with the team, or set it to "Anyone with the link".
 - Lookups only go to public web addresses on the normal ports, never to internal addresses, and give up after 8 seconds.
 
+## Working without Wi-Fi
+
+Every page you open is kept on that device, so the app still opens and shows your chamber, ballot, team research, speech plans and notes when the connection drops.
+
+- **Changes wait on the device.** Scores, question scores, rankings, your own speech log, the presiding officer's floor controls (recognize, questions, timer), speech plans, notes, team research and trackers can all be changed offline. They are sent in the order you made them, with the time you made them, as soon as the connection is back. Sending twice never saves twice.
+- **The header shows where things stand:** "Offline · 3 changes waiting", "Saving…", then "All changes saved". Tap it for the list. Anything the server refused is listed there too.
+- **Keep a team available offline.** On a team page, turn on "Keep available offline" before the tournament. That saves all of the team's research plus your speech plans and notes, and refreshes them whenever you open the team while connected.
+- **Two people edit the same research offline:** nothing is lost. The second save is kept as an "Offline copy" next to the first, so the team can keep one.
+- Some things still need a connection: votes, submitting a ballot, citation lookup, joining a team and admin settings. Signing out clears the saved pages from that device; changes that have not been sent stay and send the next time that person signs in there.
+
+## Backups and export (admins)
+
+The **Data** page (admins only) shows what is stored and how much disk it uses.
+
+- The app saves a compressed copy of the whole database once a day when something changed, and keeps 14 days (always at least the last five). A full season is a few MB, so this stays far below the 1 GB disk.
+- **Back up now** makes a copy on demand; **Download** saves any copy to your computer. Do both before a tournament.
+- **Export everything** downloads a zip with one spreadsheet per table. Passwords, private speech plans, notes, trackers and practice ballots are left out of the export (they are in the full backups).
+- **Restore** replaces everything with a stored backup or a file you upload. The current data is backed up first, so a restore can be undone. The app keeps running; nobody has to restart anything.
+
+Backups are written to a `backups` folder next to the database (`BACKUP_DIR` to change it). On Render that is the same persistent disk, which Render also snapshots daily.
+
 ## Mock tournament
 
 Admins can click **Create a mock tournament for testing** on the home page. It builds a practice chamber with 12 made-up competitors (one already the PO), 2 judges and 4 bills. A **View as** menu at the top lets the admin see and act as any of those people (vote, rise, score) from one laptop. **Setup → Delete this mock tournament** removes it and its made-up people. Made-up people never appear in the real people list.
@@ -118,6 +139,9 @@ Environment variables: `PORT` (default 3000), `DB_PATH` (default `./data/congres
 
 - `server/db.js`: schema
 - `server/app.js`: all API routes, permission checks and scoring math
+- `server/teams.js`: teams, research and prep
+- `server/backup.js`: daily backups, export and restore
+- `public/offline.js` and `public/sw.js`: saved pages and the offline outbox
 - `public/`: the single-page client (plain HTML, CSS and JavaScript, no build step)
 - `scripts/seed.js`: demo data
 - `test/`: end-to-end test
