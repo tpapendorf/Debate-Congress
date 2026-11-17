@@ -316,3 +316,10 @@ body.in-chamber .toast { bottom: 90px; }
 .meter { height: 10px; border-radius: 99px; background: var(--soft); border: 1px solid var(--line); overflow: hidden; }
 .meter > span { display: block; height: 100%; background: var(--brand-2); }
 @media (max-width: 720px) { .topbar button.netstatus { padding: 4px 8px; font-size: 11.5px; } .netstatus .long { display: none; } .netstatus .short { display: inline; } .netpanel { top: 62px; } }
+
+/* ---------- packet import ---------- */
+.packet-src input { flex: 1; min-width: 0; }
+.packet-list { max-height: 560px; overflow: auto; }
+.packet-item.off { opacity: .55; }
+.packet-session { font: 700 12px/1 var(--text); text-transform: uppercase; letter-spacing: .6px; color: var(--muted); padding-top: 12px; border: 0; }
+.packet details summary { cursor: pointer; }

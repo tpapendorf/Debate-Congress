@@ -4,7 +4,9 @@
   "private": true,
   "description": "Web app for running a high school Congressional Debate chamber: logins by role, live floor with PO precedence, timers, motions and votes, and private judge scoring.",
   "main": "server/index.js",
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server/index.js",
     "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
@@ -13,6 +15,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "express": "^4.22.3"
+    "express": "^4.22.3",
+    "unpdf": "1.9.1"
   }
 }

@@ -67,6 +67,10 @@ When the presiding officer isn't running the round in this app, an admin sets **
 - **Google Docs, Sheets, Slides and Drive folders** can be linked on the Research tab (whole team), on a bill page (that bill), or on a speech plan (just you, plus coaches and captains if you share the plan). The app only stores the link and recognises what kind of Google file it is. Opening it uses each person's own Google account, so share the file or folder with the team, or set it to "Anyone with the link".
 - Lookups only go to public web addresses on the normal ports, never to internal addresses, and give up after 8 seconds.
 
+## Tournament packets (Tabroom)
+
+Tournaments post their Congress legislation as a PDF or Word packet on Tabroom. On a team's **Research** tab (or a chamber's **Docket** tab, for admins), paste the tournament's Tabroom page or a link to the packet, or upload the file. The app finds each bill and resolution with its session, author and full text, shows a preview where titles can be fixed and items unticked, and imports what is picked. Google Docs share links work too when the doc is shared publicly. Scanned packets (images of text) cannot be read.
+
 ## Working without Wi-Fi
 
 Every page you open is kept on that device, so the app still opens and shows your chamber, ballot, team research, speech plans and notes when the connection drops.
@@ -141,6 +145,7 @@ Environment variables: `PORT` (default 3000), `DB_PATH` (default `./data/congres
 - `server/app.js`: all API routes, permission checks and scoring math
 - `server/teams.js`: teams, research and prep
 - `server/backup.js`: daily backups, export and restore
+- `server/packet.js`: reads tournament legislation packets (PDF via `unpdf`, Word)
 - `public/offline.js` and `public/sw.js`: saved pages and the offline outbox
 - `public/`: the single-page client (plain HTML, CSS and JavaScript, no build step)
 - `scripts/seed.js`: demo data

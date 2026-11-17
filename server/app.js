@@ -349,6 +349,28 @@ function createApp(db0, { publicDir = path.join(__dirname, '..', 'public'), dbFi
       .run(c.id, String(b.title).trim(), b.kind === 'resolution' ? 'resolution' : 'bill', String(b.author || ''), String(b.body || ''), order);
     return done(c);
   }));
+  function cleanPacketItems(list) {
+    if (!Array.isArray(list) || !list.length) throw bad('Pick at least one bill.');
+    return list.slice(0, 200).map((x) => ({
+      title: String(x?.title || '').replace(/\s+/g, ' ').trim().slice(0, 300), kind: x?.kind === 'resolution' ? 'resolution' : 'bill',
+      author: String(x?.author || '').trim().slice(0, 200), session: String(x?.session || '').trim().slice(0, 60), text: String(x?.text || '').slice(0, 50000),
+    })).filter((x) => x.title);
+  }
+  // Bulk-add legislation read from a tournament packet.
+  app.post('/api/chambers/:id/legislation/packet', wrap((req) => {
+    const { c } = loadChamber(req, 'admin');
+    const items = cleanPacketItems((req.body || {}).items);
+    let order = q('SELECT COALESCE(MAX(docket_order), 0) n FROM legislation WHERE chamber_id = ?').get(c.id).n;
+    let added = 0;
+    tx(() => {
+      for (const it of items) {
+        if (q('SELECT 1 FROM legislation WHERE chamber_id = ? AND title = ?').get(c.id, it.title)) continue;
+        q('INSERT INTO legislation (chamber_id, title, kind, author, body, docket_order) VALUES (?, ?, ?, ?, ?, ?)').run(c.id, it.title, it.kind, it.author, it.text, ++order);
+        added++;
+      }
+    });
+    return done(c, { added });
+  }));
   function getLeg(c, lid) {
     const l = q('SELECT * FROM legislation WHERE id = ? AND chamber_id = ?').get(Number(lid), c.id);
     if (!l) throw notFound('Legislation not found.');
@@ -1251,7 +1273,25 @@ function createApp(db0, { publicDir = path.join(__dirname, '..', 'public'), dbFi
     req.on('close', () => listeners.get(id)?.delete(res));
   });
 
-  require('./teams')(app, { db, q, tx, wrap, requireUser, bad, forbidden, notFound, hashPassword, startSession, makeUsername, now });
+  // ---------- tournament packets: read a PDF or Word file (uploaded or linked) into bills ----------
+  const packet = require('./packet');
+  app.post('/api/packet/read', express.raw({ type: ['application/octet-stream', 'application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'], limit: '25mb' }), async (req, res) => {
+    try {
+      requireUser(req);
+      let out;
+      if (Buffer.isBuffer(req.body) && req.body.length) out = { items: await packet.parsePacket(req.body, String(req.query.name || '')), source: String(req.query.name || '') };
+      else {
+        const url = String((req.body || {}).url || '').trim();
+        if (!url) throw bad('Paste a link or pick a file.');
+        out = await packet.readLink(url, require('./teams').privateAddress);
+      }
+      if (out.items && !out.items.length) throw bad('No bills or resolutions were found in that file. If it is a scanned image, ask the tournament for a text version.');
+      res.json(out);
+    } catch (e) {
+      res.status(e.status || 400).json({ error: e.status ? e.message : `Could not read that packet (${e.name === 'TimeoutError' ? 'it took too long' : e.message}).` });
+    }
+  });
+  require('./teams')(app, { db, q, tx, wrap, requireUser, bad, forbidden, notFound, hashPassword, startSession, makeUsername, now, cleanPacketItems });
   // Restoring: close the database, let open() swap in the staged file, and carry on with the restored data.
   function reopen() {
     db.close();

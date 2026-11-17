@@ -153,9 +153,10 @@ async function viewResearch() {
         ${bills.length ? `<ul class="list">${bills.map((b) => `<li><div class="spread"><a href="#/team/${teamCtx.id}/bill/${b.id}"><strong>${esc(b.title)}</strong></a><span class="small muted">updated ${fmtDate(b.updated_at)}</span></div>
           <div class="row small">${b.source ? `<span class="muted">${esc(b.source)}</span>` : ''}
             <span class="pill aff">${b.aff} aff</span><span class="pill neg">${b.neg} neg</span><span class="pill">${b.evidence} evidence</span><span class="pill">${b.questions} questions</span></div></li>`).join('')}</ul>`
-          : '<p class="muted">No bills yet. Add one, or import from a tournament docket.</p>'}
+          : '<p class="muted">No bills yet. Import a tournament packet, or add one by hand.</p>'}
       </div>
       <div>
+        ${packetCard('team')}
         <form class="card" data-tform="new-bill"><h2>Add a bill</h2>
           <div class="field"><label>Title</label><input name="title" required placeholder="A Bill to…"></div>
           <div class="inline-fields"><div class="field"><label>Type</label><select name="kind"><option value="bill">Bill</option><option value="resolution">Resolution</option></select></div>
@@ -481,4 +482,112 @@ document.addEventListener('click', async (e) => {
       case 'leave': if (confirm('Leave this team?')) { await api('POST', T('/leave')); go('#/teams'); } break;
     }
   } catch (err) { toast(err.message, true); }
+});
+
+// ---------- tournament packets: read a docket PDF/Word file or Tabroom link, pick bills, import ----------
+// target: 'team' (team research) or 'chamber' (a chamber's docket).
+function packetCard(target) {
+  const team = target === 'team';
+  // Keep a preview in progress when the page re-renders around it.
+  if (packetState?.target === target) setTimeout(() => { const box = document.querySelector(`[data-packet="${target}"]`); if (box) renderPacket(box); }, 0);
+  return `<div class="card stack packet" data-packet="${target}">
+    <h2>${team ? 'Import a tournament packet' : 'Import from a tournament packet'}</h2>
+    <p class="small muted" style="margin:0">Paste the tournament's Tabroom page or a link to its legislation packet, or upload the PDF or Word file. You can check every bill before anything is added.</p>
+    <div class="row packet-src"><input data-pk-url placeholder="tabroom.com/… or a link to the packet" inputmode="url"><button class="sm primary" data-pk="read-url">Read</button></div>
+    <div class="row packet-src"><input type="file" data-pk-file accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"><button class="sm" data-pk="read-file">Read file</button></div>
+    <div data-pk-out></div>
+  </div>`;
+}
+let packetState = null;
+function packetBox(el) { return el.closest('[data-packet]'); }
+function renderPacket(box) {
+  const out = box.querySelector('[data-pk-out]'), st = packetState;
+  if (!st) { out.innerHTML = ''; return; }
+  if (st.busy) { out.innerHTML = `<p class="small muted">${esc(st.busy)}</p>`; return; }
+  if (st.files) {
+    out.innerHTML = `<p class="small"><strong>That page has ${st.files.length} files.</strong> Pick the legislation packet:</p>
+      <ul class="list">${st.files.map((f, i) => `<li class="spread"><span class="small">${esc(f.name)}</span><button class="sm" data-pk="pick-file" data-i="${i}">Read this</button></li>`).join('')}</ul>`;
+    return;
+  }
+  const team = box.dataset.packet === 'team';
+  const picked = st.items.filter((x) => x.on).length;
+  const withText = st.items.filter((x) => x.text).length;
+  let lastSession = null;
+  out.innerHTML = `
+    <p class="small" style="margin:0"><strong>Found ${st.items.length} item${st.items.length === 1 ? '' : 's'}</strong>${withText < st.items.length ? `, ${withText} with full text` : ''}. Fix any title that came out wrong, untick what you don't need, then import.</p>
+    ${team ? `<div class="field"><label>Tournament</label><input data-pk-tourn value="${esc(st.tournament || '')}" placeholder="e.g. Tri-Cities Invitational 2026"></div>` : ''}
+    <div class="row small"><button class="linkish" data-pk="all" data-on="1">Select all</button><button class="linkish" data-pk="all" data-on="0">Select none</button></div>
+    <ul class="list packet-list">${st.items.map((x, i) => {
+      const head = x.session && x.session !== lastSession ? `<li class="packet-session">${esc(x.session)}</li>` : '';
+      lastSession = x.session || lastSession;
+      return `${head}<li class="packet-item${x.on ? '' : ' off'}">
+        <label class="row" style="align-items:flex-start;color:var(--ink)"><input type="checkbox" data-pk-on="${i}" ${x.on ? 'checked' : ''} style="width:auto;min-height:0;margin-top:12px">
+          <span class="stack" style="flex:1;min-width:0;gap:4px">
+            <input data-pk-title="${i}" value="${esc(x.title)}">
+            <span class="row small"><select data-pk-kind="${i}" style="width:auto;min-height:32px;padding:3px 8px">${['bill', 'resolution'].map((k) => `<option value="${k}" ${x.kind === k ? 'selected' : ''}>${k === 'bill' ? 'Bill' : 'Resolution'}</option>`).join('')}</select>
+              ${x.author ? `<span class="muted">${esc(x.author)}</span>` : ''}
+              ${x.text ? `<details><summary class="small">Full text</summary><pre class="legtext">${esc(x.text)}</pre></details>` : '<span class="pill warn" title="The packet lists this title but its text was not found. You can paste it in later.">Title only</span>'}</span>
+          </span></label></li>`;
+    }).join('')}</ul>
+    <div class="row"><button class="primary" data-pk="import" ${picked ? '' : 'disabled'}>Import ${picked} ${picked === 1 ? 'item' : 'items'}</button><button class="ghost sm" data-pk="clear">Start over</button></div>`;
+}
+async function packetRead(box, how, arg) {
+  const target = box.dataset.packet;
+  packetState = { target, busy: how === 'file' ? 'Reading the file…' : 'Reading the packet… this can take a few seconds.' };
+  renderPacket(box);
+  try {
+    let r;
+    if (how === 'file') {
+      const res = await fetch(`/api/packet/read?name=${encodeURIComponent(arg.name)}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: arg });
+      r = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(r.error || `Could not read that file (${res.status}).`);
+    } else r = await api('POST', '/api/packet/read', { url: arg });
+    const guess = decodeURIComponent((r.source || '').split('/').pop().split('?')[0]).replace(/\.(pdf|docx)$/i, '').replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z0-9])/g, '$1 $2').replace(/\b(congress(ional)?|legislation|docket|packet|debate)\b/gi, '').replace(/\s+/g, ' ').trim();
+    packetState = r.files ? { target, files: r.files } : { target, items: r.items.map((x) => ({ ...x, on: true })), source: r.source, tournament: guess.length > 3 ? guess : '' };
+  } catch (e) {
+    packetState = null; renderPacket(box);
+    toast(e.message === 'Failed to fetch' ? 'You are offline. Reading a packet needs a connection.' : e.message, true);
+    return;
+  }
+  renderPacket(box);
+}
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-pk]');
+  if (!b) return;
+  const box = packetBox(b), d = b.dataset;
+  switch (d.pk) {
+    case 'read-url': { const url = box.querySelector('[data-pk-url]').value.trim(); if (!url) { toast('Paste a link first.', true); break; } await packetRead(box, 'url', url); break; }
+    case 'read-file': { const f = box.querySelector('[data-pk-file]').files?.[0]; if (!f) { toast('Pick a file first.', true); break; } await packetRead(box, 'file', f); break; }
+    case 'pick-file': await packetRead(box, 'url', packetState.files[Number(d.i)].url); break;
+    case 'all': packetState.items.forEach((x) => { x.on = d.on === '1'; }); renderPacket(box); break;
+    case 'clear': packetState = null; renderPacket(box); break;
+    case 'import': {
+      const items = packetState.items.filter((x) => x.on);
+      b.disabled = true;
+      try {
+        if (box.dataset.packet === 'team') {
+          const r = await api('POST', T('/bills/packet'), { items, tournament: packetState.tournament || '' });
+          toast(r.added ? `Imported ${r.added}${r.added < items.length ? ` (${items.length - r.added} were already here)` : ''}` : 'Those are already in your research.');
+        } else {
+          const r = await api('POST', C('/legislation/packet'), { items });
+          toast(r.added ? `Added ${r.added} to the docket` : 'Those are already on the docket.');
+        }
+        packetState = null;
+        if (box.dataset.packet === 'team') reTeam(); else await loadState();
+      } catch (err) { toast(err.message, true); b.disabled = false; }
+      break;
+    }
+  }
+});
+document.addEventListener('input', (e) => {
+  const el = e.target;
+  if (!packetState?.items) return;
+  if (el.dataset.pkTitle) packetState.items[Number(el.dataset.pkTitle)].title = el.value;
+  else if (el.matches('[data-pk-tourn]')) packetState.tournament = el.value;
+});
+document.addEventListener('change', (e) => {
+  const el = e.target;
+  if (!packetState?.items) return;
+  if (el.dataset.pkOn) { packetState.items[Number(el.dataset.pkOn)].on = el.checked; renderPacket(packetBox(el)); }
+  else if (el.dataset.pkKind) packetState.items[Number(el.dataset.pkKind)].kind = el.value;
 });
