@@ -212,6 +212,21 @@ function parseCitation(html, url) {
   };
 }
 
+// A one- or two-sentence idea of what a bill does: its summary, else its first section or resolving clause.
+function billPreview(summary, body) {
+  const clip = (t) => { t = t.replace(/\s+/g, ' ').trim(); return t.length > 240 ? `${t.slice(0, 237).replace(/\s+\S*$/, '')}…` : t; };
+  if (summary && summary.trim()) return clip(summary);
+  if (!body) return '';
+  const res = body.match(/(?:^|\n)\s*(?:BE IT FURTHER )?RESOLVED,?\s*(?:That\s+)?([\s\S]+?)(?=\n\s*(?:FURTHER RESOLVED|BE IT FURTHER|Introduced|Submitted)|$)/i);
+  if (res) {
+    const t = res[1].split(/;\s*and,?\s*(?:be it\s*)?|\s(?:BE IT )?FURTHER RESOLVED/i)[0].replace(/^the Congress here assembled\s+/i, '').replace(/[;,]\s*$/, '');
+    return clip(t.charAt(0).toUpperCase() + t.slice(1));
+  }
+  const sec = body.match(/SECTION\s*1\s*[.:]\s*([\s\S]+?)(?=\n\s*(?:[A-Z]\.\s|SECTION\s*2|Introduced|Submitted)|$)/i);
+  if (sec) return clip(sec[1]);
+  return clip(body.replace(/^BE IT ENACTED[^\n]*\n?/i, ''));
+}
+
 module.exports = function mountTeams(app, h) {
   const { db, q, tx, wrap, requireUser, bad, forbidden, notFound, hashPassword, startSession, makeUsername } = h;
   const lookupCache = new Map();
@@ -312,12 +327,19 @@ module.exports = function mountTeams(app, h) {
     const members = q(`SELECT tm.user_id id, tm.role, tm.status, tm.joined_at, u.display_name name, u.school FROM team_members tm
                        JOIN users u ON u.id = tm.user_id WHERE tm.team_id = ? ORDER BY tm.status DESC, tm.role, u.display_name`).all(team.id)
       .filter((m) => isLeader || m.status === 'active');
-    const bills = q(`SELECT b.id, b.title, b.kind, b.source, b.status, b.created_by, b.updated_at,
+    const bills = q(`SELECT b.id, b.title, b.kind, b.source, b.status, b.created_by, b.updated_at, b.summary, substr(b.body, 1, 1500) body_start,
                        (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'aff') aff,
                        (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'neg') neg,
                        (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'evidence') evidence,
                        (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'question') questions
                      FROM team_bills b WHERE b.team_id = ? ORDER BY b.updated_at DESC`).all(team.id);
+    // Each bill card shows a short preview and the viewer's own speech plans on it.
+    const myPlans = q('SELECT id, bill_id, side, status FROM speech_plans WHERE team_id = ? AND user_id = ? AND bill_id IS NOT NULL ORDER BY updated_at DESC').all(team.id, user.id);
+    for (const b of bills) {
+      b.preview = billPreview(b.summary, b.body_start);
+      delete b.body_start; delete b.summary;
+      b.my_plans = myPlans.filter((p) => p.bill_id === b.id).map(({ id, side, status }) => ({ id, side, status }));
+    }
     const links = q(`SELECT l.*, u.display_name added_by FROM team_links l LEFT JOIN users u ON u.id = l.created_by
                      WHERE l.team_id = ? AND l.bill_id IS NULL AND l.plan_id IS NULL ORDER BY l.created_at DESC`).all(team.id);
     return {
@@ -745,6 +767,7 @@ module.exports = function mountTeams(app, h) {
 };
 
 module.exports.schema = schema;
+module.exports.billPreview = billPreview;
 module.exports.parseCitation = parseCitation;
 module.exports.linkKind = linkKind;
 module.exports.privateAddress = privateAddress;
