@@ -50,11 +50,11 @@ async function fileText(buf, name = '') {
 
 // ---------- splitting it into legislation ----------
 const PREFIX = String.raw`(?:(?:Bill|Legislation|Item|Resolution|Docket Item|Leg\.?)\s*#?\s*[A-Z0-9]{1,3}\s*[-–—:.)]\s*)`;
-const TITLE_RE = new RegExp(String.raw`^(?:${PREFIX}|(?:[A-Z]|\d{1,2}|[IVX]{1,4})[.):]\s+|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?:\s*|(?:Semis?|Semifinals?|Finals?|Prelims?|Session\s+\w+)\s*:?\s+)?((?:A|An)\s+(?:Bill|Resolution|Joint Resolution|Concurrent Resolution)\b.*)$`, 'i');
+const TITLE_RE = new RegExp(String.raw`^(?:${PREFIX}|[A-Z]{1,2}\s+(?=An?\s)|(?:[A-Z]|\d{1,2}|[IVX]{1,4})[.):]\s+|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?:\s*|(?:Semis?|Semifinals?|Finals?|Prelims?|Session\s+\w+)\s*:?\s+)?((?:A|An)\s+(?:Bill|Resolution|Joint Resolution|Concurrent Resolution)\b.*)$`, 'i');
 const ACT_RE = new RegExp(String.raw`^(?:${PREFIX}|(?:[A-Z]|\d{1,2})[.):]\s+|(?:Semis?|Finals?)\s*:?\s*)?((?:The\s+)?[A-Z][\w'’.,()\- ]{2,90}\bAct(?:\s+of\s+\d{4})?\s*(?:\([A-Z.\- ]+\))?)\s*$`);
 const BODY_RE = /^(?:BE IT (?:ENACTED|RESOLVED)|WHEREAS\b)/i;
-const SESSION_RE = /^(?:Congress(?:ional)?\s+|Congressional Debate\s+)?(?:(Session|Round|Chamber)\s+([0-9]+|One|Two|Three|Four|Five|Six|[IVX]+)\b|(Prelims?|Preliminary|Semi-?finals?|Semis|Finals?|Elim\w*|Super Session)\b)/i;
-const AUTHOR_RE = /^(?:Introduced|Submitted|Respectfully submitted|Authored|Written|Sponsored)\b.*?\bby\s+(.+?)\.?$/i;
+const SESSION_RE = /^(?:Congress(?:ional)?\s+|Congressional Debate\s+)?(?:(Session|Round|Chamber)\s+([0-9]+|One|Two|Three|Four|Five|Six|[IVX]+)\b|(Prelims?|Preliminary|Semi-?finals?|Semis|Finals?|Elim\w*|Super Session|Super Congress|Supers?)\b)/i;
+const AUTHOR_RE = /^(?:Introduced|Submitted|Respectfully submitted|Authored|Written|Sponsored)\b.*?\bby[.:]?\s+(.+?)\.?$/i;
 const NUM_ONLY = /^\s*\d{1,3}\s*$/;
 const HEADER_RE = /\b(LEGISLATION|DOCKET|PACKET|TOURNAMENT|INVITATIONAL|CLASSIC)\b.*\b(SESSION|ITEM|[A-Z]\b|\d)/;
 
@@ -78,6 +78,7 @@ const kindOf = (t) => (/^an?\s+(joint |concurrent )?resolution/i.test(t) ? 'reso
 function sessionLabel(m) {
   if (m[1]) return `${m[1][0].toUpperCase()}${m[1].slice(1).toLowerCase()} ${m[2]}`;
   const w = m[3].toLowerCase();
+  if (w.startsWith('super')) return 'Super Congress';
   return w.startsWith('semi') ? 'Semifinals' : w.startsWith('final') ? 'Finals' : w.startsWith('prelim') ? 'Prelims' : m[3];
 }
 
@@ -167,16 +168,21 @@ function parseText(text) {
     const hit = find(l.title);
     if (hit) {
       if (!hit.session && l.session) hit.session = l.session;
-      // Use the docket's spelling when the full text's title is garbled or shorter.
-      if (/[a-z][0-9][a-z]/i.test(hit.title) || l.title.length >= hit.title.length) hit.title = l.title;
+      // Use the docket's spelling when the full text's title is garbled.
+      if (/[a-z][0-9][a-z]/i.test(hit.title) && !/[a-z][0-9][a-z]/i.test(l.title)) hit.title = l.title;
       continue;
     }
     out.push({ title: l.title, kind: kindOf(l.title), session: l.session, author: '', text: '' });
   }
+  // Packets that set some items aside for Super Congress use the rest in the preliminary sessions.
+  if (out.some((x) => x.session === 'Super Congress')) out.forEach((x) => { if (!x.session) x.session = 'Prelims'; });
   // Keep docket order when the packet has one: listed entries first in their order.
   const order = new Map(listed.map((l, i) => [norm(l.title), i]));
   const pos = (x) => { const k = norm(x.title); if (order.has(k)) return order.get(k); const i = listed.findIndex((l) => same(l.title, x.title)); return i < 0 ? 1e6 : i; };
-  return out.map((x, i) => ({ ...x, i })).sort((a, b) => (pos(a) - pos(b)) || (a.i - b.i)).map(({ i, ...x }) => { void i; return x; });
+  // Items the docket list missed stay right after the item before them.
+  let prev = -1;
+  const keyed = out.map((x, i) => { let p = pos(x); if (p === 1e6) p = prev + 0.001 * (i + 1); else prev = p; return { x, p, i }; });
+  return keyed.sort((a, b) => (a.p - b.p) || (a.i - b.i)).map((k) => k.x);
 }
 function joinBody(lines) {
   // Re-flow wrapped lines into paragraphs; keep sections, WHEREAS clauses and lettered items on their own lines.
