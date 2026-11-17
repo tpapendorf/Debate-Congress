@@ -166,6 +166,12 @@ const ICON = {
   mic: svg('<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>'),
   book: svg('<path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19V5M8 7h7"/>'),
   trophy: svg('<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/>'),
+  pencil: svg('<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>'),
+  note: svg('<path d="M5 3h10l4 4v14H5z"/><path d="M9 12h6M9 16h6M9 8h3"/>'),
+  sec_aff: svg('<path d="M7 11v9H4v-9zM7 11l4-8a2.5 2.5 0 0 1 2.5 2.5V9h5.2a2 2 0 0 1 2 2.4l-1.4 7A2 2 0 0 1 17.3 20H7"/>'),
+  sec_neg: svg('<path d="M17 13V4h3v9zM17 13l-4 8a2.5 2.5 0 0 1-2.5-2.5V15H5.3a2 2 0 0 1-2-2.4l1.4-7A2 2 0 0 1 6.7 4H17"/>'),
+  sec_evidence: svg('<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>'),
+  sec_question: svg('<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17h.01"/>'),
   gavel: svg('<path d="m14 13-8.5 8.5a2.1 2.1 0 0 1-3-3L11 10"/><path d="m16 16 6-6M8 8l6-6M9 7l8 8M21 11l-8-8"/>'),
 };
 function billsCard(bills, adding) {
@@ -282,48 +288,92 @@ function itemForm(section, item = {}, billId) {
         <div class="small muted" data-cite-msg></div>
       </div></details>
     ${item.id ? `<input type="hidden" name="base_updated_at" value="${item.base_updated_at ?? item.updated_at ?? ''}">` : ''}
-    <div class="row"><button class="sm primary">${item.id ? 'Save' : 'Add'}</button>${item.id ? `<button type="button" class="sm ghost" data-tact="delete-item" data-bill="${billId}" data-id="${item.id}">Delete</button>` : ''}</div>
+    <div class="row"><button class="sm primary">${item.id ? 'Save' : 'Add'}</button><button type="button" class="sm ghost" data-tact="${item.id ? 'item-edit' : 'sec-add'}">Cancel</button>${item.id ? `<button type="button" class="sm danger-ghost push-right" data-tact="delete-item" data-bill="${billId}" data-id="${item.id}">Delete</button>` : ''}</div>
   </form>`;
 }
+const SECTION_META = {
+  aff: { short: 'Aff', add: 'Add an aff argument', empty: 'No affirmative arguments yet.' },
+  neg: { short: 'Neg', add: 'Add a neg argument', empty: 'No negative arguments yet.' },
+  evidence: { short: 'Evidence', add: 'Add evidence', empty: 'No evidence yet. Facts, stats and quotes with a source go here.' },
+  question: { short: 'Questions', add: 'Add a question', empty: 'No questions yet. Think about what a cross-examiner would ask.' },
+};
+const initials = (n) => (n || '?').split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
 function itemView(i, billId) {
-  const flag = i.pending ? '<span class="pill warn">Waiting to send</span> ' : i.conflict_of ? '<span class="pill failed" title="Saved while offline after a teammate changed the same entry. Keep one and delete the other.">Offline copy</span> ' : '';
-  return `<li class="item${i.pending ? ' pending' : i.conflict_of ? ' conflict' : ''}"><div class="spread"><div>${flag}${i.section === 'evidence' && i.side !== 'both' ? `<span class="pill ${i.side}">${i.side}</span> ` : ''}<strong>${esc(i.text)}</strong></div></div>
-    ${i.detail ? `<div class="small">${esc(i.detail)}</div>` : ''}
-    ${citation(i)}
-    <div class="small muted">${esc(i.updated_by_name || i.created_by_name || '')} · ${fmtDate(i.updated_at)}${citationFull(i) ? ` · <button class="linkish" data-tact="copy-cite" data-text="${esc(citationFull(i))}">Copy citation</button>` : ''}</div>
-    <details><summary class="small">Edit</summary>${itemForm(i.section, i, billId)}</details></li>`;
+  const flag = i.pending ? '<span class="pill warn">Waiting to send</span>' : i.conflict_of ? '<span class="pill failed" title="Saved while offline after a teammate changed the same entry. Keep one and delete the other.">Offline copy</span>' : '';
+  const who = i.updated_by_name || i.created_by_name || '';
+  const q = i.section === 'question';
+  return `<li class="ri ri-${i.section}${i.pending ? ' pending' : i.conflict_of ? ' conflict' : ''}">
+    <div class="ri-view">
+      ${flag || (i.section === 'evidence' && i.side !== 'both') ? `<div class="ri-flags">${flag}${i.section === 'evidence' && i.side !== 'both' ? `<span class="pill ${i.side}">Supports ${i.side}</span>` : ''}</div>` : ''}
+      <div class="ri-text">${q ? '<span class="ri-q">Q</span>' : ''}<strong>${esc(i.text)}</strong></div>
+      ${i.detail ? `<div class="ri-detail${q ? ' ri-answer' : ''}">${q ? '<span class="ri-a">A</span>' : ''}<span>${esc(i.detail)}</span></div>` : ''}
+      ${citation(i)}
+      <div class="ri-foot"><span class="ri-who"><span class="avatar-xs">${esc(initials(who))}</span>${esc(who)} · ${fmtDate(i.updated_at)}</span>
+        <span class="ri-acts">${citationFull(i) ? `<button class="linkish" data-tact="copy-cite" data-text="${esc(citationFull(i))}">Copy citation</button>` : ''}<button class="icon-btn" data-tact="item-edit" aria-label="Edit" title="Edit">${ICON.pencil}</button></span></div>
+    </div>
+    <div class="ri-edit">${itemForm(i.section, i, billId)}</div></li>`;
 }
 async function viewBill(bid) {
   const { bill, items, my_plans, my_notes, links } = await api('GET', T(`/bills/${bid}`));
   const evSide = ui.evSide || 'all';
+  const m = billMeta(bill), res = bill.kind === 'resolution';
+  const counts = Object.fromEntries(Object.keys(SECTION_META).map((k) => [k, items.filter((i) => i.section === k).length]));
+  const sc = Object.values(counts).filter(Boolean).length;
+  const [st, stl] = sc === 4 ? ['done', 'Researched'] : sc ? ['mid', 'In progress'] : ['none', 'Not started'];
   const section = (k) => {
+    const sm = SECTION_META[k];
     let list = items.filter((i) => i.section === k);
     if (k === 'evidence' && evSide !== 'all') list = list.filter((i) => i.side === evSide || i.side === 'both');
-    return `<div class="card section-${k}"><div class="spread"><h2>${SECTION_LABEL[k]} <span class="muted small">${list.length}</span></h2>
-      ${k === 'evidence' ? `<div class="seg">${['all', 'aff', 'neg'].map((s) => `<button class="${evSide === s ? 'on' : ''}" data-tact="ev-side" data-side="${s}">${s === 'all' ? 'All' : s === 'aff' ? 'Aff' : 'Neg'}</button>`).join('')}</div>` : ''}</div>
-      ${list.length ? `<ul class="list">${list.map((i) => itemView(i, bid)).join('')}</ul>` : '<p class="muted small">Nothing yet.</p>'}
-      <details><summary class="small"><strong>+ Add</strong></summary>${itemForm(k, {}, bid)}</details></div>`;
+    return `<section class="rs rs-${k}" id="sec-${k}">
+      <header class="rs-head"><span class="rs-icon">${ICON['sec_' + k]}</span><h2>${SECTION_LABEL[k]}</h2><span class="rs-count">${counts[k]}</span>
+        ${k === 'evidence' && counts.evidence ? `<div class="seg rs-filter">${['all', 'aff', 'neg'].map((s) => `<button class="${evSide === s ? 'on' : ''}" data-tact="ev-side" data-side="${s}">${s === 'all' ? 'All' : s === 'aff' ? 'Aff' : 'Neg'}</button>`).join('')}</div>` : ''}
+        <button class="sm rs-addbtn" data-tact="sec-add" aria-label="${sm.add}">+ Add</button></header>
+      <div class="rs-add" hidden><h3>${sm.add}</h3>${itemForm(k, {}, bid)}</div>
+      ${list.length ? `<ul class="rs-items">${list.map((i) => itemView(i, bid)).join('')}</ul>`
+        : `<div class="rs-empty"><p>${counts[k] ? 'Nothing for this side yet.' : sm.empty}</p><button class="sm" data-tact="sec-add">+ ${sm.add}</button></div>`}
+    </section>`;
   };
+  const plan = (side) => {
+    const p = my_plans.find((x) => x.side === side);
+    return p ? `<a class="btn sm plan-chip ${side}" href="#/team/${teamCtx.id}/plan/${p.id}">${ICON.mic}${PLAN_SIDES[side]} · ${esc(STATUS_LABEL_PLAN[p.status] || p.status)}</a>`
+      : `<button class="sm prep-${side}" data-tact="plan-from-bill" data-bill="${bill.id}" data-side="${side}" data-title="${esc(bill.title)}">${ICON.mic}${PLAN_SIDES[side]}</button>`;
+  };
+  const leader = teamCtx.data.me.isLeader;
   return `
-    <a href="#/team/${teamCtx.id}/research">← All bills</a>
-    <div class="card"><div class="spread"><h2 style="margin:0">${esc(bill.title)}</h2><span class="row"><span class="pill">${esc(bill.kind)}</span>${bill.source ? `<span class="small muted">${esc(bill.source)}</span>` : ''}</span></div>
-      <div class="row small" style="margin-top:6px">${bill.status === 'archived'
-        ? '<span class="pill">Archived</span><button class="sm" data-tact="bill-status" data-a="restore" data-id="' + bill.id + '">Restore</button>'
-        : `${bill.status === 'current' ? '<span class="pill now-pill">Current</span><button class="sm ghost" data-tact="bill-status" data-a="clear" data-id="' + bill.id + '">Unmark current</button>' : '<button class="sm" data-tact="bill-status" data-a="current" data-id="' + bill.id + '">Mark current</button>'}<button class="sm ghost" data-tact="bill-status" data-a="archive" data-id="${bill.id}">Archive</button>`}</div>
-      ${bill.summary ? `<p>${esc(bill.summary)}</p>` : ''}
-      ${bill.body ? `<details><summary class="small">Read the full text</summary><pre class="legtext">${esc(bill.body)}</pre></details>` : ''}
-      <details><summary class="small">Edit title, summary and text</summary>
-        <form class="stack" data-tform="edit-bill" data-id="${bill.id}" style="margin-top:8px"><input name="title" value="${esc(bill.title)}"><input name="source" value="${esc(bill.source)}" placeholder="Source">
-        <textarea name="summary" rows="3" placeholder="Summary">${esc(bill.summary)}</textarea><textarea name="body" rows="6" placeholder="Full text">${esc(bill.body)}</textarea>
-        <div class="row"><button class="sm primary">Save</button>${teamCtx.data.me.isLeader ? `<button type="button" class="sm ghost" data-tact="delete-bill" data-id="${bill.id}">Delete bill</button>` : ''}</div></form></details>
-      <div class="row" style="margin-top:10px"><span class="small muted">Plan a speech:</span>
-        ${Object.entries(PLAN_SIDES).map(([k, l]) => `<button class="sm ${k === 'authorship' ? '' : k}" data-tact="plan-from-bill" data-bill="${bill.id}" data-side="${k}" data-title="${esc(bill.title)}">${l}</button>`).join('')}
-        <button class="sm" data-tact="note-from-bill" data-bill="${bill.id}" data-title="${esc(bill.title)}">Private note</button></div>
-      ${my_plans.length || my_notes.length ? `<p class="small" style="margin-bottom:0">Your prep: ${[...my_plans.map((p) => `<a href="#/team/${teamCtx.id}/plan/${p.id}">${esc(p.title)}</a> <span class="pill ${p.side}">${PLAN_SIDES[p.side] || p.side}</span>`), ...my_notes.map((n) => `<a href="#/team/${teamCtx.id}/note/${n.id}">${esc(n.title)}</a>`)].join(' · ')}</p>` : ''}
-    </div>
-    <div class="grid two">
-      <div>${section('aff')}${section('evidence')}</div>
-      <div>${section('neg')}${section('question')}${linksCard(links, { title: 'Docs & folders for this bill', billId: bill.id, hint: 'Shared research docs, Drive folders or articles. Everyone on the team sees these.' })}</div>
+    <nav class="crumbs"><a href="#/team/${teamCtx.id}/research">← Bills</a>${m.tourn ? `<span>${esc(m.tourn)}</span>` : ''}${m.session ? `<span>${esc(m.session)}</span>` : ''}</nav>
+    <header class="bill-hero kind-${res ? 'resolution' : 'bill'}${bill.status === 'current' ? ' is-current' : ''}${bill.status === 'archived' ? ' is-archived' : ''}">
+      <div class="bh-top">
+        <div class="bc-kicker"><span class="type-badge">${res ? ICON.res : ICON.bill}${res ? 'Resolution' : 'Bill'}</span>${m.school ? `<span class="bc-school">${ICON.school}${esc(m.school)}</span>` : ''}${bill.status === 'current' ? `<span class="pill now-pill">${ICON.star}Up next</span>` : ''}${bill.status === 'archived' ? '<span class="pill">Archived</span>' : ''}</div>
+        <details class="bc-menu"><summary aria-label="More for this bill">⋯</summary><div class="bc-pop">
+          ${bill.status === 'archived' ? `<button data-tact="bill-status" data-a="restore" data-id="${bill.id}">Restore</button>`
+            : `${bill.status === 'current' ? `<button data-tact="bill-status" data-a="clear" data-id="${bill.id}">Unmark current</button>` : `<button data-tact="bill-status" data-a="current" data-id="${bill.id}">Mark current</button>`}<button data-tact="bill-status" data-a="archive" data-id="${bill.id}">Archive</button>`}
+          <button data-tact="bill-edit">Edit details</button>
+          ${leader ? `<button class="danger" data-tact="delete-bill" data-id="${bill.id}">Delete…</button>` : ''}
+        </div></details>
+      </div>
+      <h1 class="bh-title">${esc(bill.title)}</h1>
+      ${bill.preview ? `<p class="bc-preview bh-preview">${esc(bill.preview)}</p>` : ''}
+      ${bill.body ? `<details class="bh-text"><summary class="btn sm ghost">${ICON.bill}<span class="when-closed">Read the full text</span><span class="when-open">Hide the full text</span></summary><pre class="legtext">${esc(bill.body)}</pre></details>` : ''}
+      <form class="stack bh-edit" data-tform="edit-bill" data-id="${bill.id}" hidden>
+        <div class="field"><label>Title</label><input name="title" value="${esc(bill.title)}"></div>
+        <div class="field"><label>Tournament · session · school</label><input name="source" value="${esc(bill.source)}" placeholder="WSFA Fall 2026 · Prelims · School"></div>
+        <div class="field"><label>Summary</label><textarea name="summary" rows="3" placeholder="One or two sentences on what it does">${esc(bill.summary)}</textarea></div>
+        <div class="field"><label>Full text</label><textarea name="body" rows="8">${esc(bill.body)}</textarea></div>
+        <div class="row"><button class="sm primary">Save</button><button type="button" class="sm ghost" data-tact="bill-edit">Cancel</button></div></form>
+      <div class="bh-prep">
+        <div class="bh-prep-label">Your prep</div>
+        <div class="bh-prep-btns">${plan('aff')}${plan('neg')}${plan('authorship')}
+          ${my_notes.length ? my_notes.map((n) => `<a class="btn sm ghost" href="#/team/${teamCtx.id}/note/${n.id}">${ICON.note}${esc(n.title.replace(/^Notes: .*/, 'My notes'))}</a>`).join('') : `<button class="sm ghost" data-tact="note-from-bill" data-bill="${bill.id}" data-title="${esc(bill.title)}">${ICON.note}Private note</button>`}</div>
+      </div>
+    </header>
+    <nav class="rs-jump" aria-label="Research sections">
+      <span class="rd-badge rd-${st}" title="${sc} of 4 research areas started"><span class="pips">${Object.keys(SECTION_META).map((k) => `<i class="${counts[k] ? 'on' : ''}"></i>`).join('')}</span>${stl}</span>
+      ${Object.entries(SECTION_META).map(([k, sm]) => `<a href="#sec-${k}" data-jump="sec-${k}" class="jump-${k}${counts[k] ? ' on' : ''}"><b>${counts[k]}</b> ${counts[k] === 1 && k === 'question' ? 'Question' : sm.short}</a>`).join('')}
+      <a href="#sec-docs" data-jump="sec-docs" class="jump-docs${links.length ? ' on' : ''}"><b>${links.length}</b> Docs</a>
+    </nav>
+    <div class="rs-grid">
+      <div class="rs-col">${section('aff')}${section('evidence')}</div>
+      <div class="rs-col">${section('neg')}${section('question')}<div id="sec-docs">${linksCard(links, { title: 'Docs &amp; folders', billId: bill.id, hint: 'Shared research docs, Drive folders or articles for this bill.' })}</div></div>
     </div>`;
 }
 
@@ -551,6 +601,9 @@ document.addEventListener('click', async (e) => {
           : '<p class="muted small">No docket items in chambers you belong to yet.</p>';
         break;
       }
+      case 'sec-add': { const sec = b.closest('.rs'); const box = sec.querySelector('.rs-add'); box.hidden = !box.hidden; sec.classList.toggle('adding', !box.hidden); if (!box.hidden) box.querySelector('textarea').focus(); break; }
+      case 'item-edit': { const li = b.closest('.ri'); li.classList.toggle('editing'); if (li.classList.contains('editing')) li.querySelector('.ri-edit textarea').focus(); break; }
+      case 'bill-edit': { const f = document.querySelector('.bh-edit'); f.hidden = !f.hidden; if (!f.hidden) f.querySelector('input').focus(); break; }
       case 'ev-side': ui.evSide = d.side; reTeam(); break;
       case 'add-bills': ui.addBills = !document.querySelector('.add-bills'); if (!ui.addBills && packetState?.target === 'team') packetState = null; reTeam(); break;
       case 'bill-filter': ui.billFilter = d.f; ui.billSel = []; redrawBills(); break;
@@ -718,5 +771,7 @@ document.addEventListener('change', (e) => {
 
 // Close an open bill-card menu when tapping anywhere else.
 document.addEventListener('click', (e) => {
+  const j = e.target.closest('[data-jump]');
+  if (j) { e.preventDefault(); document.getElementById(j.dataset.jump)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
   for (const m of document.querySelectorAll('details.bc-menu[open]')) if (!m.contains(e.target) || e.target.closest('.bc-pop button')) m.open = false;
 });
