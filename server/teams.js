@@ -390,6 +390,24 @@ module.exports = function mountTeams(app, h) {
       .run(team.id, title, b.kind === 'resolution' ? 'resolution' : 'bill', str(b.source, 200), str(b.summary), str(b.body, 50000), user.id, now());
     return { id: Number(r.lastInsertRowid) };
   }));
+  // Bills read from a tournament packet (see packet.js), picked by the student.
+  app.post('/api/teams/:tid/bills/packet', wrap((req) => {
+    const { team, user } = loadTeam(req);
+    const items = h.cleanPacketItems((req.body || {}).items);
+    const tourn = str((req.body || {}).tournament, 120);
+    let added = 0;
+    const ids = [];
+    tx(() => {
+      for (const it of items) {
+        const have = q('SELECT id FROM team_bills WHERE team_id = ? AND title = ?').get(team.id, it.title);
+        if (have) { ids.push(have.id); continue; }
+        const r = q('INSERT INTO team_bills (team_id, title, kind, source, summary, body, created_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+          .run(team.id, it.title, it.kind, [tourn, it.session, it.author].filter(Boolean).join(' · ').slice(0, 200), '', it.text, user.id, now());
+        ids.push(Number(r.lastInsertRowid)); added++;
+      }
+    });
+    return { added, ids };
+  }));
   // Docket items the user can see in chambers they belong to (or all, for admins), to copy into the team library.
   app.get('/api/teams/:tid/docket-options', wrap((req) => {
     const { user } = loadTeam(req);

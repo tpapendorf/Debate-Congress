@@ -1191,6 +1191,7 @@ function viewDocket() {
     </li>`).join('')}</ul>` : '<p class="muted">No legislation on the docket yet.</p>'}
     ${m.canChair && s.legislation.length > 1 ? '<p class="small muted">After the chamber votes on docket order, set it here with the arrows.</p>' : ''}
     </div>
+    ${editing ? packetCard('chamber') : ''}
     ${editing ? `<form class="card" data-form="new-leg"><h2>Add legislation</h2>
       <div class="field"><label>Title</label><input name="title" required placeholder="A Bill to…"></div>
       <div class="inline-fields"><div class="field"><label>Type</label><select name="kind"><option value="bill">Bill</option><option value="resolution">Resolution</option></select></div>
