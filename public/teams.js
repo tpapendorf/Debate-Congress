@@ -105,11 +105,11 @@ async function renderTeam(id, tab = 'research', sub, sub2) {
     $view.innerHTML = `<div class="card"><p>${esc(e.message)}</p><a href="#/teams">← Teams</a></div>`; return;
   }
   const tabs = [['research', 'Research'], ['prep', 'My prep'], ['progress', 'Progress'], ['members', data.me.isLeader ? `Members${data.members.some((m) => m.status === 'pending') ? ' •' : ''}` : 'Members']];
-  const active = ['bill'].includes(tab) ? 'research' : (['plan', 'note'].includes(tab) ? 'prep' : tab);
+  const active = ['bill'].includes(tab) ? 'research' : (['plan', 'note', 'practice'].includes(tab) ? 'prep' : tab);
   let body;
   try {
     body = await ({
-      research: viewResearch, bill: () => viewBill(Number(sub)), prep: viewPrep, plan: () => viewPlan(Number(sub)), note: () => viewNote(Number(sub)),
+      research: viewResearch, bill: () => viewBill(Number(sub)), prep: viewPrep, plan: () => viewPlan(Number(sub)), practice: () => viewPractice(Number(sub)), note: () => viewNote(Number(sub)),
       progress: () => viewProgress(sub ? Number(sub) : null), members: viewMembers,
     }[tab] || viewResearch)();
   } catch (e) { body = `<div class="card"><p>${esc(e.message)}</p></div>`; }
@@ -388,7 +388,7 @@ async function viewPrep() {
       <div class="card"><h2>Speech plans</h2>
         ${plans.length ? `<ul class="list">${plans.map((p) => `<li class="spread"><div><a href="#/team/${teamCtx.id}/plan/${p.id}"><strong>${esc(p.title)}</strong></a>
             <div class="small muted">${p.bill_title ? esc(p.bill_title) : 'No bill'}${p.tournament ? ` · ${esc(p.tournament)}` : ''}</div></div>
-          <span class="row"><span class="pill ${p.side}">${PLAN_SIDES[p.side] || p.side}</span><span class="pill plan-${p.status}">${STATUS_LABEL_PLAN[p.status]}</span>${p.shared_with_leaders ? '<span class="pill">Shared</span>' : ''}</span></li>`).join('')}</ul>` : '<p class="muted small">No speech plans yet.</p>'}
+          <span class="row"><span class="pill ${p.side}">${PLAN_SIDES[p.side] || p.side}</span><span class="pill plan-${p.status}">${STATUS_LABEL_PLAN[p.status]}</span>${p.shared_with_leaders ? '<span class="pill">Shared</span>' : ''}<a class="btn sm ghost prep-practice" href="#/team/${teamCtx.id}/practice/${p.id}" title="Practice this speech">${ICON.mic}${p.practice_count ? `${p.practice_count}× · ${fmtT(p.practice_last)}` : 'Practice'}</a></span></li>`).join('')}</ul>` : '<p class="muted small">No speech plans yet.</p>'}
         <form data-tform="new-plan" class="stack" style="margin-top:10px"><h3>New speech plan</h3>
           <input name="title" placeholder="Working title" required>
           <div class="inline-fields"><select name="bill_id">${billOpts()}</select><select name="side">${Object.entries(PLAN_SIDES).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
@@ -404,7 +404,7 @@ async function viewPrep() {
     </div>`;
 }
 async function viewPlan(pid) {
-  const { plan, own, author, items, links } = await api('GET', T(`/plans/${pid}`));
+  const { plan, own, author, items, links, runs = [] } = await api('GET', T(`/plans/${pid}`));
   const used = items.filter((i) => citationFull(i) && plan.outline.includes(i.text));
   const cited = `<div class="card"><div class="spread"><h2>Works cited</h2>${used.length ? `<button class="sm" data-tact="copy-cite" data-text="${esc(used.map(citationFull).join('\n'))}">Copy all</button>` : ''}</div>
     ${used.length ? `<ol class="works-cited">${used.map((i) => `<li>${esc(citationFull(i))}${i.cite_url ? ` <a href="${esc(i.cite_url)}" target="_blank" rel="noopener noreferrer">↗</a>` : ''}</li>`).join('')}</ol>`
@@ -429,10 +429,15 @@ async function viewPlan(pid) {
         ${own ? `<label class="row" style="color:var(--ink)"><input type="checkbox" name="shared_with_leaders" ${plan.shared_with_leaders ? 'checked' : ''} style="width:auto;min-height:0"> Share this plan with my coaches and captains</label>
         <div class="row"><button class="primary">Save</button><button type="button" class="sm ghost" data-tact="delete-plan" data-id="${plan.id}">Delete</button><span class="small muted" data-saved></span></div>` : ''}
       </form>
+      <div>
+      ${own || runs.length ? `<div class="card practice-card"><div class="spread"><h2>Practice</h2>${runStats(runs)}</div>
+        ${own ? `<button class="primary practice-go" data-tact="plan-practice" data-id="${plan.id}">${ICON.mic}Practice this speech</button>` : ''}
+        ${runs.length ? runsLog(runs, plan.id, own, 3) : `<p class="small muted">Run it against a 3-minute timer, record yourself, and keep notes on what to fix.</p>`}</div>` : ''}
       <div class="card"><h2>Team research${plan.bill_title ? ` on this bill` : ''}</h2>
         ${!plan.bill_id ? '<p class="muted small">Pick a bill to see the team\'s arguments, evidence and likely questions here.</p>'
           : relevant.length ? groups.map((g) => { const list = relevant.filter((i) => i.section === g); return list.length ? `<h3>${SECTION_LABEL[g]}</h3><ul class="list">${list.map((i) => `<li><div class="spread"><strong class="small">${esc(i.text)}</strong>${own ? `<button class="sm" data-tact="insert" data-text="${esc(i.text + (i.detail ? ` (${i.detail})` : '') + (citationText(i) ? ` [${citationText(i)}]` : ''))}">Insert</button>` : ''}</div>${citation(i)}</li>`).join('')}</ul>` : ''; }).join('')
           : `<p class="muted small">No research yet. <a href="#/team/${teamCtx.id}/bill/${plan.bill_id}">Add some on the bill page</a>.</p>`}
+      </div>
       </div>
     </div>
     <div class="grid two">${cited}${linksCard(links, { title: 'My docs for this speech', planId: plan.id, canAdd: own, hint: own ? 'Link your Google Doc draft or anything else for this speech. Only you see these, plus coaches and captains if you share the plan.' : '' })}</div>`;
@@ -449,6 +454,183 @@ async function viewNote(nid) {
       <div class="row"><button class="primary">Save</button><button type="button" class="sm ghost" data-tact="delete-note" data-id="${n.id}">Delete</button><span class="small muted">Private to you</span></div>
     </form>`;
 }
+
+// ---------- speech practice ----------
+// A timer that counts down like a PO's, with signals at 1:00, 0:30 and 0:10, a 10-second grace period,
+// an optional recording kept on this device, and a log of each run's time and notes.
+const fmtT = (sec) => { const a = Math.abs(Math.round(sec)); return `${sec < 0 ? '+' : ''}${Math.floor(a / 60)}:${String(a % 60).padStart(2, '0')}`; };
+const GRACE = 10;
+const TARGETS = [[180, 'Speech 3:00'], [120, 'Questions 2:00'], [60, 'Questions 1:00']];
+let prac = null;
+function pracOpts() { try { return { notes: true, record: false, sound: false, ...JSON.parse(localStorage.getItem('congress.practice') || '{}') }; } catch { return { notes: true, record: false, sound: false }; } }
+function savePracOpts(o) { try { localStorage.setItem('congress.practice', JSON.stringify(o)); } catch { /* fine */ } }
+function runVerdict(sec, target) {
+  const d = sec - target;
+  if (d > GRACE) return ['over', `${fmtT(d).slice(1)} over`];
+  if (d > 0) return ['grace', `${d}s into grace`];
+  if (d >= -15) return ['good', 'Right on time'];
+  return ['short', `${fmtT(-d)} short`];
+}
+const stars = (n) => `<span class="stars" aria-label="${n} of 5">${[1, 2, 3, 4, 5].map((i) => `<i class="${i <= n ? 'on' : ''}">★</i>`).join('')}</span>`;
+function runsLog(runs, planId, own, limit) {
+  if (!runs.length) return '<p class="muted small">No practice runs yet.</p>';
+  const list = limit ? runs.slice(0, limit) : runs;
+  return `<ul class="run-log">${list.map((r) => { const [k, l] = runVerdict(r.seconds, r.target); return `<li class="run v-${k}${r.pending ? ' pending' : ''}">
+      <span class="run-time">${fmtT(r.seconds)}</span>
+      <span class="run-main"><span class="run-verdict">${l}</span><span class="small muted">${fmtDate(r.created_at)}${r.target !== 180 ? ` · ${fmtT(r.target)} target` : ''}${r.pending ? ' · waiting to send' : ''}</span>${r.notes ? `<span class="run-notes">${esc(r.notes)}</span>` : ''}</span>
+      ${r.rating ? stars(r.rating) : ''}
+      ${own && r.id ? `<button class="icon-btn" data-tact="run-del" data-plan="${planId}" data-id="${r.id}" aria-label="Delete run" title="Delete run">✕</button>` : ''}</li>`; }).join('')}</ul>
+    ${limit && runs.length > limit ? `<a class="small" href="#/team/${teamCtx.id}/practice/${planId}">See all ${runs.length} runs</a>` : ''}`;
+}
+function runStats(runs) {
+  if (!runs.length) return '';
+  const onTime = runs.filter((r) => ['good', 'grace'].includes(runVerdict(r.seconds, r.target)[0])).length;
+  const avg = Math.round(runs.reduce((a, r) => a + r.seconds, 0) / runs.length);
+  return `<div class="run-stats"><span><b>${runs.length}</b> run${runs.length === 1 ? '' : 's'}</span><span><b>${fmtT(avg)}</b> average</span><span><b>${onTime}</b> on time</span></div>`;
+}
+async function viewPractice(pid) {
+  const { plan, own, runs } = await api('GET', T(`/plans/${pid}`));
+  if (!own) return `<div class="card"><p>Only ${'the speaker'} can practice this speech.</p></div>`;
+  const o = pracOpts();
+  const target = TARGETS.some(([t]) => t === ui.pracTarget) ? ui.pracTarget : 180;
+  const canRecord = !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
+  return `
+    <nav class="crumbs"><a href="#/team/${teamCtx.id}/plan/${plan.id}">← ${esc(plan.title)}</a></nav>
+    <div class="practice ${o.notes && plan.outline ? 'with-notes' : ''}" data-practice="${plan.id}" data-target="${target}">
+      <section class="pr-stage s-ready">
+        <div class="pr-head"><span class="pill ${plan.side}">${PLAN_SIDES[plan.side] || plan.side}</span><span class="pr-bill">${esc(plan.bill_title || plan.title)}</span></div>
+        <div class="seg pr-targets">${TARGETS.map(([t, l]) => `<button class="${t === target ? 'on' : ''}" data-tact="prac-target" data-t="${t}">${l}</button>`).join('')}</div>
+        <div class="pr-clock" data-clock>${fmtT(target)}</div>
+        <div class="pr-signal" data-signal>Ready when you are</div>
+        <div class="pr-bar"><span data-bar></span>${[60, 30].map((x) => `<i style="left:${(1 - x / target) * 100}%"></i>`).join('')}</div>
+        <div class="pr-controls">
+          <button class="primary pr-go" data-tact="prac-go">Start</button>
+          <button class="pr-finish" data-tact="prac-finish" hidden>Finish</button>
+          <button class="ghost pr-reset" data-tact="prac-reset" hidden>Start over</button>
+        </div>
+        <div class="pr-opts">
+          ${plan.outline ? `<label class="switch-row small"><input type="checkbox" data-prac-opt="notes" ${o.notes ? 'checked' : ''}> Show my outline</label>` : ''}
+          ${canRecord ? `<label class="switch-row small"><input type="checkbox" data-prac-opt="record" ${o.record ? 'checked' : ''}> Record audio</label>` : ''}
+          <label class="switch-row small"><input type="checkbox" data-prac-opt="sound" ${o.sound ? 'checked' : ''}> Beep at signals</label>
+        </div>
+        <p class="small muted pr-hint"><span class="kbd-only">Space starts and pauses. </span>Signals at 1:00, 0:30 and 0:10 left, then ${GRACE} seconds of grace.</p>
+      </section>
+      ${plan.outline ? `<aside class="pr-notes"><h3>Outline</h3><div class="pr-outline">${esc(plan.outline)}</div></aside>` : ''}
+    </div>
+    <section class="card pr-review" hidden>
+      <h2>How did that go?</h2>
+      <div class="pr-result" data-result></div>
+      <div data-playback></div>
+      <form class="stack" data-tform="save-run" data-plan="${plan.id}">
+        <input type="hidden" name="seconds"><input type="hidden" name="target"><input type="hidden" name="rating" value="0">
+        <div class="field"><label>Rate it</label><div class="rate">${[1, 2, 3, 4, 5].map((i) => `<button type="button" data-tact="prac-rate" data-n="${i}" aria-label="${i} star${i > 1 ? 's' : ''}">★</button>`).join('')}</div></div>
+        <div class="field"><label>What to fix next time</label><textarea name="notes" rows="2" placeholder="Slow down in the intro, cite the GAO stat by name…"></textarea></div>
+        <div class="row"><button class="primary">Save run</button><button type="button" class="ghost" data-tact="prac-reset">Discard and go again</button></div>
+      </form>
+    </section>
+    <section class="card"><div class="spread"><h2>Practice log</h2>${runStats(runs)}</div>${runsLog(runs, plan.id, true)}</section>`;
+}
+function pracEls() { const root = document.querySelector('[data-practice]'); return root && { root, stage: root.querySelector('.pr-stage'), clock: root.querySelector('[data-clock]'), signal: root.querySelector('[data-signal]'), bar: root.querySelector('[data-bar]'), go: root.querySelector('.pr-go'), fin: root.querySelector('.pr-finish'), reset: root.querySelector('.pr-reset') }; }
+function pracElapsed() { return prac ? prac.acc + (prac.startedAt ? (performance.now() - prac.startedAt) / 1000 : 0) : 0; }
+function beep(freq = 880, ms = 160) {
+  try { const ctx = prac.audio || (prac.audio = new AudioContext()); const osc = ctx.createOscillator(), g = ctx.createGain(); osc.frequency.value = freq; g.gain.value = 0.15; osc.connect(g).connect(ctx.destination); osc.start(); osc.stop(ctx.currentTime + ms / 1000); } catch { /* no sound */ }
+}
+function pracTick() {
+  const e = pracEls();
+  if (!e || !prac) { pracStop(true); return; }
+  const t = prac.target, el = pracElapsed(), left = t - el;
+  const stage = !prac.startedAt && !prac.acc ? 'ready' : left > 60 ? 'go' : left > 30 ? 'min' : left > 0 ? 'half' : left > -GRACE ? 'grace' : 'over';
+  e.clock.textContent = fmtT(left > 0 ? Math.ceil(left) : Math.floor(left));
+  e.bar.style.width = `${Math.min(100, (el / t) * 100)}%`;
+  const label = { ready: 'Ready when you are', go: 'Speaking', min: '1 minute left', half: left <= 10 ? '10 seconds' : '30 seconds left', grace: 'Time. Finish your sentence', over: 'Over time' }[stage];
+  e.signal.textContent = prac.startedAt ? label : (stage === 'ready' ? label : 'Paused');
+  e.stage.className = `pr-stage s-${stage}${prac.startedAt ? ' running' : ''}`;
+  const mark = stage === 'half' && left <= 10 ? 'ten' : stage;
+  if (prac.startedAt && mark !== prac.lastMark) {
+    if (['min', 'half', 'ten', 'grace', 'over'].includes(mark)) { if (prac.sound) beep(mark === 'over' || mark === 'grace' ? 440 : 880, mark === 'grace' ? 500 : 160); try { navigator.vibrate?.(mark === 'grace' ? [200, 100, 200] : 120); } catch { /* fine */ } }
+    prac.lastMark = mark;
+  }
+}
+async function pracStart() {
+  const e = pracEls(); if (!e) return;
+  const o = pracOpts();
+  if (!prac) {
+    prac = { target: Number(e.root.dataset.target), acc: 0, startedAt: 0, lastMark: 'ready', sound: o.sound, chunks: [] };
+    if (o.record && navigator.mediaDevices?.getUserMedia && window.MediaRecorder) {
+      try {
+        prac.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        prac.rec = new MediaRecorder(prac.stream);
+        const chunks = prac.chunks;
+        prac.rec.ondataavailable = (ev) => { if (ev.data.size) chunks.push(ev.data); };
+        prac.rec.start(1000);
+      } catch { toast('Could not use the microphone. Practicing without a recording.', true); }
+    }
+    try { prac.wake = await navigator.wakeLock?.request('screen'); } catch { /* screen may sleep */ }
+    prac.timer = setInterval(pracTick, 200);
+  } else if (prac.rec?.state === 'paused') prac.rec.resume();
+  prac.startedAt = performance.now();
+  e.go.textContent = 'Pause'; e.go.classList.remove('primary'); e.fin.hidden = false; e.reset.hidden = false;
+  pracTick();
+}
+function pracPause() {
+  const e = pracEls(); if (!prac || !e) return;
+  prac.acc = pracElapsed(); prac.startedAt = 0;
+  if (prac.rec?.state === 'recording') prac.rec.pause();
+  e.go.textContent = 'Resume'; e.go.classList.add('primary');
+  pracTick();
+}
+function pracStop(silent) {
+  if (!prac) return null;
+  clearInterval(prac.timer);
+  const sec = Math.round(pracElapsed()), p = prac;
+  try { p.wake?.release(); } catch { /* fine */ }
+  const done = new Promise((res) => {
+    if (p.rec && p.rec.state !== 'inactive') { p.rec.onstop = () => res(p.chunks.length ? new Blob(p.chunks, { type: p.rec.mimeType || 'audio/webm' }) : null); p.rec.stop(); } else res(p.chunks.length ? new Blob(p.chunks) : null);
+  }).finally(() => p.stream?.getTracks().forEach((t) => t.stop()));
+  prac = null;
+  if (silent) return null;
+  return { sec, target: p.target, recording: done };
+}
+async function pracFinish() {
+  const r = pracStop(); if (!r) return;
+  const e = pracEls(); const review = document.querySelector('.pr-review');
+  if (r.sec < 1) { pracReset(); return; }
+  e.go.textContent = 'Start'; e.go.classList.add('primary'); e.go.hidden = true; e.fin.hidden = true; e.reset.hidden = false;
+  e.signal.textContent = 'Done';
+  const [k, l] = runVerdict(r.sec, r.target);
+  review.hidden = false;
+  review.querySelector('[data-result]').innerHTML = `<span class="pr-big v-${k}">${fmtT(r.sec)}</span><span><strong>${l}</strong><br><span class="small muted">Target ${fmtT(r.target)}</span></span>`;
+  const f = review.querySelector('form'); f.seconds.value = r.sec; f.target.value = r.target;
+  review.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const blob = await r.recording;
+  if (blob) {
+    if (ui.pracUrl) URL.revokeObjectURL(ui.pracUrl);
+    ui.pracUrl = URL.createObjectURL(blob);
+    const ext = /mp4|aac/.test(blob.type) ? 'm4a' : /ogg/.test(blob.type) ? 'ogg' : 'webm';
+    review.querySelector('[data-playback]').innerHTML = `<div class="pr-play"><audio controls src="${ui.pracUrl}"></audio><a class="btn sm ghost" href="${ui.pracUrl}" download="practice-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.${ext}">Download</a></div>
+      <p class="small muted">The recording stays on this device and is gone when you leave this page. Download it to keep it.</p>`;
+  }
+}
+function pracReset() {
+  pracStop(true);
+  const e = pracEls(); if (!e) return;
+  e.go.hidden = false; e.go.textContent = 'Start'; e.go.classList.add('primary'); e.fin.hidden = true; e.reset.hidden = true;
+  e.clock.textContent = fmtT(Number(e.root.dataset.target)); e.bar.style.width = '0'; e.signal.textContent = 'Ready when you are'; e.stage.className = 'pr-stage s-ready';
+  const review = document.querySelector('.pr-review'); if (review) { review.hidden = true; review.querySelector('form').reset(); review.querySelector('[data-playback]').innerHTML = ''; review.querySelectorAll('.rate button').forEach((x) => x.classList.remove('on')); }
+}
+window.addEventListener('hashchange', () => { if (prac) pracStop(true); });
+document.addEventListener('keydown', (e) => {
+  if (e.code !== 'Space' || !document.querySelector('[data-practice]') || e.target.closest('input, textarea, select, button, [contenteditable]')) return;
+  const review = document.querySelector('.pr-review'); if (review && !review.hidden) return;
+  e.preventDefault();
+  if (prac?.startedAt) pracPause(); else pracStart();
+});
+document.addEventListener('change', (e) => {
+  const opt = e.target.closest('[data-prac-opt]'); if (!opt) return;
+  const o = pracOpts(); o[opt.dataset.pracOpt] = opt.checked; savePracOpts(o);
+  if (opt.dataset.pracOpt === 'notes') document.querySelector('.practice')?.classList.toggle('with-notes', opt.checked);
+  if (opt.dataset.pracOpt === 'sound' && prac) prac.sound = opt.checked;
+});
 
 // ---------- progress ----------
 async function viewProgress(uid) {
@@ -543,6 +725,7 @@ document.addEventListener('submit', async (e) => {
       case 'new-bill': { const r = await api('POST', T('/bills'), d); go(`#/team/${teamCtx.id}/bill/${r.id}`); break; }
       case 'edit-bill': await api('PUT', T(`/bills/${f.dataset.id}`), d); toast('Saved'); reTeam(); break;
       case 'new-item': savedToast(await api('POST', T(`/bills/${f.dataset.bill}/items`), { ...d, section: f.dataset.section }), 'Added'); reTeam(); break;
+      case 'save-run': { const r = await api('POST', T(`/plans/${f.dataset.plan}/runs`), { seconds: Number(d.seconds), target: Number(d.target), rating: Number(d.rating), notes: d.notes }); savedToast(r, 'Practice run saved'); reTeam(); break; }
       case 'edit-item': { const r = await api('PUT', T(`/bills/${f.dataset.bill}/items/${f.dataset.id}`), { ...d, section: f.dataset.section }); if (r?.conflict) toast('A teammate changed this while you were away. Your version was saved as a copy next to theirs.', true); else savedToast(r, 'Saved'); reTeam(); break; }
       case 'new-plan': { const r = await api('POST', T('/plans'), d); go(`#/team/${teamCtx.id}/plan/${r.id}`); break; }
       case 'save-plan': savedToast(await api('PUT', T(`/plans/${f.dataset.id}`), { ...d, shared_with_leaders: !!f.querySelector('[name=shared_with_leaders]')?.checked }), 'Saved'); reTeam(); break;
@@ -601,6 +784,17 @@ document.addEventListener('click', async (e) => {
           : '<p class="muted small">No docket items in chambers you belong to yet.</p>';
         break;
       }
+      case 'plan-practice': {
+        const f = document.querySelector('[data-tform=save-plan]');
+        if (f && !f.querySelector('[name=title]').disabled) { const fd = Object.fromEntries(new FormData(f)); await api('PUT', T(`/plans/${d.id}`), { ...fd, shared_with_leaders: !!f.querySelector('[name=shared_with_leaders]')?.checked }); }
+        go(`#/team/${teamCtx.id}/practice/${d.id}`); break;
+      }
+      case 'prac-go': if (prac?.startedAt) pracPause(); else await pracStart(); break;
+      case 'prac-finish': await pracFinish(); break;
+      case 'prac-reset': pracReset(); break;
+      case 'prac-target': if (prac) break; ui.pracTarget = Number(d.t); { const r = document.querySelector('[data-practice]'); r.dataset.target = d.t; r.querySelector('[data-clock]').textContent = fmtT(Number(d.t)); r.querySelectorAll('.pr-targets button').forEach((x) => x.classList.toggle('on', x === b)); r.querySelectorAll('.pr-bar i').forEach((x, i) => { x.style.left = `${(1 - [60, 30][i] / Number(d.t)) * 100}%`; }); } break;
+      case 'prac-rate': { const f = b.closest('form'); f.rating.value = d.n; f.querySelectorAll('.rate button').forEach((x) => x.classList.toggle('on', Number(x.dataset.n) <= Number(d.n))); break; }
+      case 'run-del': if (confirm('Delete this practice run?')) { await api('DELETE', T(`/plans/${d.plan}/runs/${d.id}`)); reTeam(); } break;
       case 'sec-add': { const sec = b.closest('.rs'); const box = sec.querySelector('.rs-add'); box.hidden = !box.hidden; sec.classList.toggle('adding', !box.hidden); if (!box.hidden) box.querySelector('textarea').focus(); break; }
       case 'item-edit': { const li = b.closest('.ri'); li.classList.toggle('editing'); if (li.classList.contains('editing')) li.querySelector('.ri-edit textarea').focus(); break; }
       case 'bill-edit': { const f = document.querySelector('.bh-edit'); f.hidden = !f.hidden; if (!f.hidden) f.querySelector('input').focus(); break; }

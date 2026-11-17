@@ -109,7 +109,7 @@ const Offline = (() => {
     ['POST', /^\/api\/chambers\/\d+\/(my-log|my-log\/-?\d+\/questions|recognize|questions|questioning|speech\/end|timer|legislation\/\d+\/begin)$/],
     ['DELETE', /^\/api\/chambers\/\d+\/(my-log\/-?\d+|my-questions\/-?\d+|questions\/-?\d+|speeches\/-?\d+)$/],
     ['PUT', /^\/api\/teams\/\d+\/(plans\/-?\d+|notes\/-?\d+|bills\/\d+\/items\/-?\d+)$/],
-    ['POST', /^\/api\/teams\/\d+\/(plans|notes|bills\/\d+\/items)$/],
+    ['POST', /^\/api\/teams\/\d+\/(plans|notes|bills\/\d+\/items|plans\/-?\d+\/runs)$/],
     ['PUT', /^\/api\/trackers\/\d+$/],
   ];
   const queueable = (method, url) => QUEUE.some(([m, re]) => m === method && re.test(url));
@@ -307,6 +307,12 @@ const Offline = (() => {
       if (view === `/plans/${id}` && d.plan) fix(d.plan);
       return;
     }
+    if ((m = path.match(/^\/plans\/(-?\d+)\/runs$/))) {
+      const id = idOf(m[1]);
+      if (view === `/plans/${id}`) d.runs = [{ id: 0, seconds: Number(b.seconds) || 0, target: Number(b.target) || 180, rating: Number(b.rating) || 0, notes: b.notes || '', created_at: op.time, pending: true }, ...(d.runs || [])];
+      if (view === '/prep') d.plans?.filter((p) => p.id === id).forEach((p) => { p.practice_count = (p.practice_count || 0) + 1; p.practice_last = Number(b.seconds) || 0; });
+      return;
+    }
     if ((m = path.match(/^\/notes\/(-?\d+)$/))) {
       const id = idOf(m[1]);
       if (view === '/prep') d.notes?.filter((n) => n.id === id).forEach((n) => { Object.assign(n, pick(b, ['title', 'body'])); if (b.bill_id !== undefined) n.bill_id = b.bill_id ? Number(b.bill_id) : null; n.updated_at = op.time; });
@@ -339,7 +345,7 @@ const Offline = (() => {
     const billId = b.bill_id ? Number(b.bill_id) : null;
     const bill = billId ? await cacheOp('get', keyFor(`/api/teams/${m[1]}/bills/${billId}`, viewAs)) : null;
     return { plan: { id: op.tmp.id, user_id: op.uid, title: b.title || 'Untitled speech', bill_id: billId, side: b.side || 'aff', status: b.status || 'idea', tournament: b.tournament || '', outline: b.outline || '', shared_with_leaders: 0, updated_at: op.time },
-      own: true, author: op.uname, items: bill?.data?.items || [], links: [] };
+      own: true, author: op.uname, items: bill?.data?.items || [], links: [], runs: [] };
   }
 
   // ---------- status in the header ----------
@@ -348,7 +354,7 @@ const Offline = (() => {
     const p = op.url.replace(/^\/api\/(chambers|teams)\/\d+/, '');
     const table = [[/scores|po-score|question-scores/, 'Score'], [/rankings/, 'Ranking'], [/my-log\/-?\d+\/questions|my-questions/, 'Question in your log'], [/my-log/, 'Speech in your log'],
       [/recognize/, 'Recognized speaker'], [/questions/, 'Question'], [/timer|questioning|speech\/end/, 'Timer'], [/begin/, 'Debate started'], [/speeches/, 'Removed speech'],
-      [/plans/, 'Speech plan'], [/notes/, 'Note'], [/items/, 'Team research'], [/trackers/, 'Tracker']];
+      [/runs/, 'Practice run'], [/plans/, 'Speech plan'], [/notes/, 'Note'], [/items/, 'Team research'], [/trackers/, 'Tracker']];
     return (table.find(([re]) => re.test(p)) || [null, 'Change'])[1];
   }
   function banner() {

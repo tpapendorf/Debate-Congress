@@ -60,6 +60,12 @@ When the presiding officer isn't running the round in this app, an admin sets **
 - Each person's log is private. Two judges in the same room keep separate logs and never see each other's. A wrong entry can be fixed or removed until the ballot is submitted.
 - Rankings, submitting, publishing and results work the same. Results count speeches from the judges' logs.
 
+## Speech practice
+
+Every speech plan has a **Practice this speech** button. The practice screen runs a countdown like a PO's timer: 3:00 for a speech, or 2:00 or 1:00 for questioning. It signals at 1:00, 0:30 and 0:10 left by changing color, and can also vibrate or beep. Then it gives 10 seconds of grace before it shows over time. Your outline can sit beside the timer, and Space starts and pauses it on a laptop.
+
+Tick **Record audio** to record the run. You can play it back and download it right after, but the recording never leaves the device. Each run's time, a 1 to 5 star rating and a note on what to fix are saved to a practice log on the plan. Runs saved offline send later.
+
 ## Citations and linked docs
 
 - **Fill in from link.** On any evidence card, paste the article link and press *Fill in from link*. The server reads the page's public details (author, title, publication, date) from the tags news sites and journals publish for this purpose. Check the result and fix anything it missed; some sites block lookups, and then you fill it in by hand.
