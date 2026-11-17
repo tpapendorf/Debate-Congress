@@ -145,57 +145,84 @@ const reTeam = () => route();
 const savedToast = (r, msg) => toast(r?.queued ? `${msg} on this device. It sends when you are back online.` : msg);
 
 // ---------- research ----------
-const redrawBills = () => { const c = document.querySelector('.bills-card'); if (c) c.outerHTML = billsCard(teamCtx.data.bills); };
-const tournOf = (b) => (b.source || '').split(' · ')[0].trim();
-function billsCard(bills) {
+const redrawBills = () => { const c = document.querySelector('.bills-card'); if (c) c.outerHTML = billsCard(teamCtx.data.bills, !!document.querySelector('.add-bills')); };
+const SESSION_WORD = /^(Prelims?|Preliminary|Session\b|Super|Semi|Finals?|Round\b|Elim)/i;
+function billMeta(b) {
+  const parts = (b.source || '').split(' · ').map((x) => x.trim()).filter(Boolean);
+  if (parts.length >= 3) return { tourn: parts[0], session: parts[1], school: parts.slice(2).join(' · ') };
+  if (parts.length === 2) return SESSION_WORD.test(parts[1]) ? { tourn: parts[0], session: parts[1], school: '' } : { tourn: parts[0], session: '', school: parts[1] };
+  return { tourn: parts[0] || '', session: '', school: '' };
+}
+function researchLine(b) {
+  const bits = [[b.aff, 'aff'], [b.neg, 'neg'], [b.evidence, 'evidence'], [b.questions, b.questions === 1 ? 'question' : 'questions']].filter(([n]) => n);
+  return bits.length ? bits.map(([n, l]) => `${n} ${l}`).join(' · ') : '';
+}
+function billsCard(bills, adding) {
   const counts = { current: bills.filter((b) => b.status === 'current').length, all: bills.filter((b) => b.status !== 'archived').length, archived: bills.filter((b) => b.status === 'archived').length };
   const f = ui.billFilter && (counts[ui.billFilter] || ui.billFilter === 'all') ? ui.billFilter : (counts.current ? 'current' : 'all');
   const inTab = bills.filter((b) => (f === 'archived' ? b.status === 'archived' : f === 'current' ? b.status === 'current' : b.status !== 'archived'));
-  const tourns = [...new Set(inTab.map(tournOf).filter(Boolean))].sort();
+  const tourns = [...new Set(inTab.map((b) => billMeta(b).tourn).filter(Boolean))].sort();
   const tf = tourns.includes(ui.billTourn) ? ui.billTourn : '';
-  const list = inTab.filter((b) => !tf || tournOf(b) === tf);
+  const list = inTab.filter((b) => !tf || billMeta(b).tourn === tf);
   const sel = (ui.billSel || []).filter((id) => list.some((b) => b.id === id));
   ui.billSel = sel;
   const leader = teamCtx.data.me.isLeader;
+  // Group by tournament, then session, keeping the order bills were added in.
+  const groups = [];
+  for (const b of [...list].sort((x, y) => x.id - y.id)) {
+    const m = billMeta(b), t = m.tourn || 'Other bills';
+    let g = groups.find((x) => x.t === t); if (!g) groups.push(g = { t, sessions: [] });
+    let ss = g.sessions.find((x) => x.s === m.session); if (!ss) g.sessions.push(ss = { s: m.session, bills: [] });
+    ss.bills.push({ b, m });
+  }
+  const row = ({ b, m }) => {
+    const r = researchLine(b);
+    return `<li class="bill-row${b.status === 'current' ? ' is-current' : ''}${sel.includes(b.id) ? ' picked' : ''}">
+      <input type="checkbox" data-bill-sel="${b.id}" ${sel.includes(b.id) ? 'checked' : ''} aria-label="Select ${esc(b.title)}">
+      <a class="bill-title" href="#/team/${teamCtx.id}/bill/${b.id}">${esc(b.title)}</a>
+      <span class="bill-meta">${b.status === 'current' && f !== 'current' ? '<span class="pill now-pill">Current</span>' : ''}${m.school ? `<span class="muted">${esc(m.school)}</span>` : ''}${r ? `<span class="research">${esc(r)}</span>` : ''}</span>
+    </li>`;
+  };
   const tabs = [['current', 'Current'], ['all', 'All'], ['archived', 'Archived']];
-  return `<div class="card bills-card"><div class="spread"><h2>Bills and resolutions</h2>
-      <div class="seg">${tabs.map(([k, l]) => `<button class="${f === k ? 'on' : ''}" data-tact="bill-filter" data-f="${k}">${l} <span class="muted">${counts[k]}</span></button>`).join('')}</div></div>
-    ${tourns.length > 1 ? `<div class="row small" style="margin:8px 0"><label for="bill-tourn" class="muted">Tournament</label><select id="bill-tourn" data-bill-tourn style="width:auto;min-height:34px;padding:4px 8px"><option value="">All tournaments</option>${tourns.map((t) => `<option ${t === tf ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>` : ''}
+  return `<div class="card bills-card">
+    <div class="bills-head">
+      <h2>Bills</h2>
+      <div class="seg">${tabs.map(([k, l]) => `<button class="${f === k ? 'on' : ''}" data-tact="bill-filter" data-f="${k}">${l} <span class="muted">${counts[k]}</span></button>`).join('')}</div>
+      ${tourns.length > 1 ? `<select data-bill-tourn aria-label="Tournament"><option value="">All tournaments</option>${tourns.map((t) => `<option ${t === tf ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>` : ''}
+      <button class="sm ${adding ? '' : 'primary'} add-btn" data-tact="add-bills">${adding && bills.length ? 'Done adding' : '+ Add bills'}</button>
+    </div>
     ${list.length ? `
-    <div class="bulkbar row small">
-      <label class="row" style="color:var(--ink)"><input type="checkbox" data-bill-all ${sel.length && sel.length === list.length ? 'checked' : ''} style="width:auto;min-height:0"> ${sel.length ? `${sel.length} selected` : 'Select all'}</label>
+    <div class="bulkbar ${sel.length ? 'on' : ''}">
+      <label><input type="checkbox" data-bill-all ${sel.length && sel.length === list.length ? 'checked' : ''}> ${sel.length ? `${sel.length} selected` : 'Select'}</label>
       ${sel.length ? `${f === 'archived'
         ? '<button class="sm" data-tact="bill-bulk" data-a="restore">Restore</button>'
-        : `<button class="sm" data-tact="bill-bulk" data-a="current">Mark current</button>${f === 'current' || list.some((b) => sel.includes(b.id) && b.status === 'current') ? '<button class="sm" data-tact="bill-bulk" data-a="clear">Unmark current</button>' : ''}<button class="sm" data-tact="bill-bulk" data-a="archive">Archive</button>`}
+        : `<button class="sm" data-tact="bill-bulk" data-a="current">Mark current</button>${list.some((b) => sel.includes(b.id) && b.status === 'current') ? '<button class="sm" data-tact="bill-bulk" data-a="clear">Unmark current</button>' : ''}<button class="sm" data-tact="bill-bulk" data-a="archive">Archive</button>`}
         ${leader ? '<button class="sm danger-ghost" data-tact="bill-bulk" data-a="delete">Delete</button>' : ''}` : ''}
     </div>
-    <ul class="list bill-list">${list.map((b) => `<li class="${b.status === 'current' ? 'is-current' : ''}"><div class="row" style="align-items:flex-start;flex-wrap:nowrap">
-      <input type="checkbox" data-bill-sel="${b.id}" ${sel.includes(b.id) ? 'checked' : ''} aria-label="Select ${esc(b.title)}" style="width:auto;min-height:0;margin-top:5px">
-      <div style="flex:1;min-width:0"><div class="spread"><a href="#/team/${teamCtx.id}/bill/${b.id}"><strong>${esc(b.title)}</strong></a>${b.status === 'current' ? '<span class="pill now-pill">Current</span>' : ''}</div>
-        <div class="row small">${b.source ? `<span class="muted">${esc(b.source)}</span>` : ''}
-          <span class="pill aff">${b.aff} aff</span><span class="pill neg">${b.neg} neg</span><span class="pill">${b.evidence} evidence</span><span class="pill">${b.questions} questions</span></div></div></div></li>`).join('')}</ul>`
-    : `<p class="muted">${!bills.length ? 'No bills yet. Import a tournament packet, or add one by hand.' : f === 'current' ? 'No bills are marked current. Open All, select the bills for your next tournament, and tap Mark current.' : f === 'archived' ? 'Nothing archived.' : 'Every bill is archived. Open Archived to bring some back.'}</p>`}
+    ${groups.map((g) => `<section class="bill-group">${groups.length > 1 || g.t !== 'Other bills' ? `<h3 class="group-title">${esc(g.t)} <span class="muted">${g.sessions.reduce((a, x) => a + x.bills.length, 0)}</span></h3>` : ''}
+      ${g.sessions.map((ss) => `${ss.s ? `<div class="session-title">${esc(ss.s)}</div>` : ''}<ul class="bill-rows">${ss.bills.map(row).join('')}</ul>`).join('')}</section>`).join('')}`
+    : `<p class="muted">${!bills.length ? 'No bills yet. Import a tournament packet below, or add one by hand.' : f === 'current' ? 'No bills are marked current. Open All, tick the bills for your next tournament, and tap Mark current.' : f === 'archived' ? 'Nothing archived.' : 'Every bill is archived. Open Archived to bring some back.'}</p>`}
   </div>`;
 }
 
 async function viewResearch() {
   const { bills, links } = teamCtx.data;
+  const adding = ui.addBills || !bills.length || packetState?.target === 'team';
   return `
-    <div class="grid side">
-      ${billsCard(bills)}
-      <div>
-        ${packetCard('team')}
-        <form class="card" data-tform="new-bill"><h2>Add a bill</h2>
-          <div class="field"><label>Title</label><input name="title" required placeholder="A Bill to…"></div>
-          <div class="inline-fields"><div class="field"><label>Type</label><select name="kind"><option value="bill">Bill</option><option value="resolution">Resolution</option></select></div>
-          <div class="field"><label>Source</label><input name="source" placeholder="e.g. State Quals docket"></div></div>
-          <div class="field"><label>Summary</label><textarea name="summary" rows="3"></textarea></div>
-          <button class="primary">Add</button></form>
-        ${linksCard(links || [], { title: 'Team docs & folders', hint: 'The team Drive folder, a shared docket doc, a research spreadsheet…' })}
-        <div class="card"><h2>Import from a docket</h2><p class="small muted">Copies bills from chambers you're in, so the team can research them.</p>
-          <div data-docket-options><button class="sm" data-tact="load-docket">Show docket items</button></div></div>
-      </div>
-    </div>`;
+    ${billsCard(bills, adding)}
+    ${adding ? `<div class="grid two add-bills">
+      <div>${packetCard('team')}
+        <div class="card"><h2>Import from a chamber docket</h2><p class="small muted">Copies bills from chambers you're in, so the team can research them.</p>
+          <div data-docket-options><button class="sm" data-tact="load-docket">Show docket items</button></div></div></div>
+      <form class="card" data-tform="new-bill"><h2>Add a bill by hand</h2>
+        <div class="field"><label>Title</label><input name="title" required placeholder="A Bill to…"></div>
+        <div class="inline-fields"><div class="field"><label>Type</label><select name="kind"><option value="bill">Bill</option><option value="resolution">Resolution</option></select></div>
+        <div class="field"><label>Tournament</label><input name="source" placeholder="e.g. WSFA Fall 2026"></div></div>
+        <div class="field"><label>Summary</label><textarea name="summary" rows="3"></textarea></div>
+        <button class="primary">Add</button></form>
+    </div>` : ''}
+    <details class="card docs-fold" ${links?.length ? '' : ''}><summary><h2 style="display:inline">Team docs &amp; folders</h2> <span class="muted small">${links?.length || 0}</span></summary>
+      ${linksCard(links || [], { title: '', hint: 'The team Drive folder, a shared docket doc, a research spreadsheet…' }).replace(/^<div class="card[^"]*"><h2><\/h2>/, '<div>')}</details>`;
 }
 function itemForm(section, item = {}, billId) {
   const isEv = section === 'evidence';
@@ -481,6 +508,7 @@ document.addEventListener('click', async (e) => {
         break;
       }
       case 'ev-side': ui.evSide = d.side; reTeam(); break;
+      case 'add-bills': ui.addBills = !document.querySelector('.add-bills'); if (!ui.addBills && packetState?.target === 'team') packetState = null; reTeam(); break;
       case 'bill-filter': ui.billFilter = d.f; ui.billSel = []; redrawBills(); break;
       case 'bill-bulk': {
         const ids = ui.billSel || [];
@@ -624,7 +652,7 @@ document.addEventListener('click', async (e) => {
           toast(r.added ? `Added ${r.added} to the docket` : 'Those are already on the docket.');
         }
         packetState = null;
-        if (box.dataset.packet === 'team') reTeam(); else await loadState();
+        if (box.dataset.packet === 'team') { ui.addBills = false; ui.billFilter = 'all'; reTeam(); } else await loadState();
       } catch (err) { toast(err.message, true); b.disabled = false; }
       break;
     }
