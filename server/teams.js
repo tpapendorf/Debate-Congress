@@ -95,6 +95,17 @@ function schema(db) {
       created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS practice_runs (
+      id INTEGER PRIMARY KEY,
+      team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      plan_id INTEGER NOT NULL REFERENCES speech_plans(id) ON DELETE CASCADE,
+      seconds INTEGER NOT NULL,
+      target INTEGER NOT NULL DEFAULT 180,
+      rating INTEGER NOT NULL DEFAULT 0,
+      notes TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS team_goals (
       id INTEGER PRIMARY KEY,
       team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
@@ -556,7 +567,7 @@ module.exports = function mountTeams(app, h) {
   function planFields(team, b, existing = {}) {
     const title = str(b.title ?? existing.title, 200);
     if (!title) throw bad('Give the speech a working title.');
-    let billId = b.bill_id === undefined ? existing.bill_id : (b.bill_id ? Number(b.bill_id) : null);
+    let billId = b.bill_id === undefined ? (existing.bill_id ?? null) : (b.bill_id ? Number(b.bill_id) : null);
     if (billId) getBill(team, billId);
     const side = ['authorship', 'aff', 'neg'].includes(b.side) ? b.side : (existing.side || 'aff');
     const status = PLAN_STATUS.includes(b.status) ? b.status : (existing.status || 'idea');
@@ -566,7 +577,9 @@ module.exports = function mountTeams(app, h) {
   app.get('/api/teams/:tid/prep', wrap((req) => {
     const { team, user } = loadTeam(req);
     return {
-      plans: q(`SELECT p.*, b.title bill_title FROM speech_plans p LEFT JOIN team_bills b ON b.id = p.bill_id
+      plans: q(`SELECT p.*, b.title bill_title, (SELECT COUNT(*) FROM practice_runs r WHERE r.plan_id = p.id) practice_count,
+                (SELECT seconds FROM practice_runs r WHERE r.plan_id = p.id ORDER BY r.created_at DESC, r.id DESC LIMIT 1) practice_last
+                FROM speech_plans p LEFT JOIN team_bills b ON b.id = p.bill_id
                 WHERE p.team_id = ? AND p.user_id = ? ORDER BY p.updated_at DESC`).all(team.id, user.id),
       notes: q(`SELECT n.*, b.title bill_title FROM team_notes n LEFT JOIN team_bills b ON b.id = n.bill_id
                 WHERE n.team_id = ? AND n.user_id = ? ORDER BY n.updated_at DESC`).all(team.id, user.id),
@@ -592,7 +605,8 @@ module.exports = function mountTeams(app, h) {
     const evidence = p.bill_id ? q(`SELECT * FROM bill_items WHERE bill_id = ? ORDER BY section, id`).all(p.bill_id) : [];
     const author = q('SELECT display_name FROM users WHERE id = ?').get(p.user_id)?.display_name;
     const links = q('SELECT * FROM team_links WHERE plan_id = ? ORDER BY created_at DESC').all(p.id);
-    return { plan: p, own, author, items: evidence, links };
+    const runs = q('SELECT id, seconds, target, rating, notes, created_at FROM practice_runs WHERE plan_id = ? ORDER BY created_at DESC, id DESC').all(p.id);
+    return { plan: p, own, author, items: evidence, links, runs };
   }));
   app.put('/api/teams/:tid/plans/:pid', wrap((req) => {
     const { team, user, isLeader } = loadTeam(req);
@@ -601,6 +615,25 @@ module.exports = function mountTeams(app, h) {
     const f = planFields(team, req.body || {}, p);
     q(`UPDATE speech_plans SET bill_id = ?, side = ?, title = ?, tournament = ?, status = ?, outline = ?, shared_with_leaders = ?, updated_at = ? WHERE id = ?`)
       .run(f.bill_id, f.side, f.title, f.tournament, f.status, f.outline, f.shared, now(), p.id);
+    return { ok: true };
+  }));
+  // Timed practice runs of a speech. Recordings stay on the speaker's device; only the time and their notes are saved.
+  app.post('/api/teams/:tid/plans/:pid/runs', wrap((req) => {
+    const { team, user, isLeader } = loadTeam(req);
+    const { p, own } = getPlan(req, team, user, isLeader);
+    if (!own) throw forbidden('Only the author can log practice for this speech.');
+    const b = req.body || {};
+    const seconds = Math.round(Number(b.seconds));
+    if (!Number.isFinite(seconds) || seconds < 1 || seconds > 3600) throw bad('That practice run has no time.');
+    const target = [60, 120, 180, 240, 300].includes(Number(b.target)) ? Number(b.target) : 180;
+    const rating = Math.max(0, Math.min(5, Math.round(Number(b.rating) || 0)));
+    const r = q('INSERT INTO practice_runs (team_id, user_id, plan_id, seconds, target, rating, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(team.id, user.id, p.id, seconds, target, rating, str(b.notes, 2000), now());
+    return { id: Number(r.lastInsertRowid) };
+  }));
+  app.delete('/api/teams/:tid/plans/:pid/runs/:rid', wrap((req) => {
+    const { team, user } = loadTeam(req);
+    q('DELETE FROM practice_runs WHERE id = ? AND plan_id = ? AND team_id = ? AND user_id = ?').run(Number(req.params.rid), Number(req.params.pid), team.id, user.id);
     return { ok: true };
   }));
   app.delete('/api/teams/:tid/plans/:pid', wrap((req) => {
