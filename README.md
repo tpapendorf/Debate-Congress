@@ -66,6 +66,16 @@ Every speech plan has a **Practice this speech** button. The practice screen run
 
 Tick **Record audio** to record the run. You can play it back and download it right after, but the recording never leaves the device. Each run's time, a 1 to 5 star rating and a note on what to fix are saved to a practice log on the plan. Runs saved offline send later.
 
+## AI Learning Aids
+
+The app never talks to an AI itself. Instead, each bill page has an **AI Learning Aids** panel:
+
+1. **Get the kit.** Download or copy a Markdown prep kit. It has the bill's full text, what the team already has, the rules for the AI, and the exact format to reply in. The rules are: a learning aid not a speech, both sides, and real sources with links only.
+2. **Ask your AI.** Give the kit to Claude, ChatGPT or any other assistant, ideally one that can search the web.
+3. **Upload its reply.** Upload the .md file or paste the reply. A preview lists the summary, arguments, evidence and questions it found, so you pick what to keep. Entries already on the bill are unticked. Evidence without a real link can't be added.
+
+Everything added this way carries an **AI Learning Aid** badge, and keeps it even after a teammate edits it. Anyone can untick **Show AI Learning Aids** at the top of the team page to hide them for themselves; research counts then leave them out too. A coach can turn **Allow AI Learning Aids** off in Team settings. That hides them for the whole team and stops new uploads, but nothing is deleted.
+
 ## Citations and linked docs
 
 - **Fill in from link.** On any evidence card, paste the article link and press *Fill in from link*. The server reads the page's public details (author, title, publication, date) from the tags news sites and journals publish for this purpose. Check the result and fix anything it missed; some sites block lookups, and then you fill it in by hand.
@@ -156,6 +166,7 @@ Environment variables: `PORT` (default 3000), `DB_PATH` (default `./data/congres
 - `server/teams.js`: teams, research and prep
 - `server/backup.js`: daily backups, export and restore
 - `server/packet.js`: reads tournament legislation packets (PDF via `unpdf`, Word)
+- `server/aikit.js`: reads the reply a student's own AI assistant wrote from the bill prep kit (AI Learning Aids)
 - `public/offline.js` and `public/sw.js`: saved pages and the offline outbox
 - `public/`: the single-page client (plain HTML, CSS and JavaScript, no build step)
 - `scripts/seed.js`: demo data

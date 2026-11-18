@@ -118,6 +118,7 @@ async function renderTeam(id, tab = 'research', sub, sub2) {
     <a href="#/teams">← Teams</a>
     <div class="spread"><h1>${esc(data.team.name)}</h1><span class="row">${data.team.school ? `<span class="small muted">${esc(data.team.school)}</span>` : ''}<span class="pill">${ROLE_LABEL[data.me.role]}</span></span></div>
     <label class="switch-row small" title="Saves this team's research, your speech plans and notes on this device so they open without Wi-Fi."><input type="checkbox" data-keep-offline="${id}" ${keepOffline(id) ? 'checked' : ''}> Keep available offline <span class="muted" data-keep-label>${keepOffline(id) ? `· ${esc(keptLabel(id))}` : ''}</span></label>
+    ${data.team.ai_aids ? `<label class="switch-row small" title="Show research that teammates wrote with an AI assistant. Only changes what you see."><input type="checkbox" data-ai-show ${data.me.showAi ? 'checked' : ''}> Show AI Learning Aids</label>` : ''}
     <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/team/${id}/${k}" class="${k === active ? 'active' : ''}">${l}</a>`).join('')}</nav>
     ${body}`;
   void sub2;
@@ -291,6 +292,125 @@ function itemForm(section, item = {}, billId) {
     <div class="row"><button class="sm primary">${item.id ? 'Save' : 'Add'}</button><button type="button" class="sm ghost" data-tact="${item.id ? 'item-edit' : 'sec-add'}">Cancel</button>${item.id ? `<button type="button" class="sm danger-ghost push-right" data-tact="delete-item" data-bill="${billId}" data-id="${item.id}">Delete</button>` : ''}</div>
   </form>`;
 }
+// ---------- AI Learning Aids ----------
+// The app never calls an AI. A student downloads a prep kit (Markdown), gives it to their own assistant,
+// and uploads the reply. Everything that comes back is tagged as an AI Learning Aid and can be hidden.
+const AI_ICON = '<svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M12 2l1.8 5.4L19 9l-5.2 1.6L12 16l-1.8-5.4L5 9l5.2-1.6zM19 14l.9 2.6 2.6.9-2.6.9L19 21l-.9-2.6-2.6-.9 2.6-.9zM5 15l.7 1.8 1.8.7-1.8.7L5 20l-.7-1.8-1.8-.7 1.8-.7z"/></svg>';
+const aiBadge = () => `<span class="ai-badge" title="Written with an AI assistant">${AI_ICON}AI Learning Aid</span>`;
+const aiOn = () => !!(teamCtx.data.team.ai_aids && teamCtx.data.me.showAi);
+let aiPreview = null;
+function aiKit(bill, items) {
+  const m = billMeta(bill);
+  const have = (k) => items.filter((i) => i.section === k).map((i) => `- ${i.text}`).join('\n') || '- (none yet)';
+  return `# Congress Debate prep kit: ${bill.title}
+
+## Instructions for the AI assistant
+
+You are helping a high school student prepare for Congressional Debate on the legislation below. Your reply is saved in their team's prep app as an **AI Learning Aid**: it should teach and give starting points. Do not write a finished speech.
+
+Follow these rules:
+
+1. **Real sources only.** Every piece of evidence must come from a real, published source, with its full link. If you cannot browse the web or check a source, leave the Evidence section empty. Never invent statistics, quotes, authors, dates or links.
+2. Give arguments for **both** sides. Keep each claim to one sentence, then give the warrant (why it is true) and the impact (why it matters).
+3. Aim for 3 to 5 affirmative arguments, 3 to 5 negative arguments, 4 to 8 pieces of evidence, and 4 to 8 likely questions.
+4. Don't repeat what the team already has (listed at the end).
+5. Reply with **only** one Markdown document in exactly the format below, so the student can upload it. Keep the \`##\` headings and the \`- Key:\` lines exactly as shown. Save it as a .md file if you can.
+
+## Reply format
+
+\`\`\`markdown
+# AI Learning Aid: ${bill.title}
+
+## Summary
+Two or three plain-English sentences on what the legislation does and who it affects.
+
+## Affirmative arguments
+### One-sentence claim
+Warrant: why it is true.
+Impact: why it matters.
+
+## Negative arguments
+### One-sentence claim
+Warrant: why it is true.
+Impact: why it matters.
+
+## Evidence
+### The fact, statistic or short quote
+- Supports: aff | neg | either
+- Source: publication or website
+- Author: person or organization
+- Title: article or report title
+- Date: publication date
+- Link: https://the-full-link
+How to use it: one sentence.
+
+## Likely questions
+### A question a cross-examiner might ask
+- For: aff | neg | either (which speaker should prepare for it)
+Answer: a short suggested answer.
+\`\`\`
+
+## The legislation
+
+- **Title:** ${bill.title}
+- **Type:** ${bill.kind === 'resolution' ? 'Resolution' : 'Bill'}
+${m.tourn ? `- **Tournament:** ${m.tourn}\n` : ''}${m.session ? `- **Session:** ${m.session}\n` : ''}${m.school ? `- **Written by:** ${m.school}\n` : ''}
+${bill.summary ? `**Summary:** ${bill.summary}\n\n` : ''}${bill.body ? `### Full text\n\n${bill.body}\n` : '(The full text was not entered. Work from the title, and say so in the summary.)\n'}
+## What the team already has
+
+### Affirmative arguments
+${have('aff')}
+
+### Negative arguments
+${have('neg')}
+
+### Evidence
+${have('evidence')}
+
+### Likely questions
+${have('question')}
+`;
+}
+function aiPreviewHtml() {
+  const p = aiPreview?.data; if (!p) return '';
+  const LABEL = { summary: 'Summary', aff: 'Affirmative arguments', neg: 'Negative arguments', evidence: 'Evidence', question: 'Likely questions' };
+  const groups = ['aff', 'neg', 'evidence', 'question'].map((k) => [k, p.items.map((it, n) => ({ it, n })).filter(({ it }) => it.section === k)]).filter(([, l]) => l.length);
+  const ok = (it) => !it.flags.length;
+  const count = p.items.filter(ok).length + (p.summary ? 1 : 0);
+  return `<div class="ai-preview">
+    ${p.warnings.map((w) => `<div class="banner recess small">${esc(w)}</div>`).join('')}
+    ${p.summary ? `<label class="aip-row"><input type="checkbox" data-aip="summary" checked><span><b>${LABEL.summary}</b><span class="aip-detail">${esc(p.summary)}</span></span></label>` : ''}
+    ${groups.map(([k, l]) => `<h4>${LABEL[k]} <span class="muted">${l.length}</span></h4>${l.map(({ it, n }) => {
+      const noLink = it.flags.includes('no_link'), dup = it.flags.includes('duplicate');
+      return `<label class="aip-row${noLink ? ' blocked' : ''}"><input type="checkbox" data-aip="${n}" ${ok(it) ? 'checked' : ''} ${noLink ? 'disabled' : ''}>
+        <span><b>${esc(it.text)}</b>${it.side !== 'both' && ['evidence', 'question'].includes(k) ? ` <span class="pill ${it.side}">${it.side}</span>` : ''}
+        ${it.detail ? `<span class="aip-detail">${esc(it.detail)}</span>` : ''}
+        ${it.cite_url ? `<span class="aip-detail">${esc([it.cite_source, it.cite_date].filter(Boolean).join(', '))} <a href="${esc(it.cite_url)}" target="_blank" rel="noopener noreferrer">${esc(linkHost(it.cite_url))} ↗</a></span>` : ''}
+        ${noLink ? '<span class="aip-flag">No link to a real source, so it can\'t be added. Ask your AI for the link.</span>' : ''}${dup ? '<span class="aip-flag">Already on this bill</span>' : ''}</span></label>`; }).join('')}`).join('')}
+    <div class="row aip-actions"><button class="primary" data-tact="ai-import" ${count ? '' : 'disabled'}>${AI_ICON}Add ${count} as AI Learning Aids</button><button class="ghost" data-tact="ai-cancel">Cancel</button></div>
+  </div>`;
+}
+function aiBand(bill) {
+  const team = teamCtx.data.team, me2 = teamCtx.data.me;
+  if (!team.ai_aids) return '';
+  if (!me2.showAi) return `<p class="ai-hidden small muted">${AI_ICON} AI Learning Aids are hidden for you. <button class="linkish" data-tact="ai-hide" data-hide="0">Show them</button></p>`;
+  return `<section class="ai-band">
+    <div class="ai-band-head"><span class="ai-mark">${AI_ICON}</span><div><h2>AI Learning Aids</h2>
+      <p class="small">Give your AI assistant this bill's prep kit. It explains the rules and the reply format. Then upload what it writes back.</p></div></div>
+    <div class="ai-steps">
+      <div class="ai-step"><span class="ai-num">1</span><div><b>Get the kit</b><div class="row"><button class="sm" data-tact="ai-kit-dl" data-id="${bill.id}">Download .md</button><button class="sm ghost" data-tact="ai-kit-copy" data-id="${bill.id}">Copy</button></div></div></div>
+      <div class="ai-step"><span class="ai-num">2</span><div><b>Ask your AI</b><div class="small muted">Attach or paste the kit into Claude, ChatGPT or another assistant that can search the web.</div></div></div>
+      <div class="ai-step"><span class="ai-num">3</span><div><b>Upload its reply</b><div class="row"><button class="sm primary" data-tact="ai-upload" >Upload reply</button></div></div></div>
+    </div>
+    <div class="ai-upload" ${aiPreview?.bid === bill.id ? '' : 'hidden'}>
+      ${aiPreview?.bid === bill.id && aiPreview.data ? aiPreviewHtml() : `<div class="stack">
+        <label class="ai-file"><input type="file" accept=".md,.markdown,.txt,text/plain,text/markdown" data-ai-file> <span>Choose the .md file</span></label>
+        <textarea rows="6" data-ai-text placeholder="…or paste the AI's whole reply here"></textarea>
+        <div class="row"><button class="sm primary" data-tact="ai-read" data-id="${bill.id}">Read reply</button><button class="sm ghost" data-tact="ai-cancel">Cancel</button></div></div>`}
+    </div>
+    <div class="ai-band-foot small"><button class="linkish" data-tact="ai-hide" data-hide="1">Hide AI Learning Aids</button></div>
+  </section>`;
+}
 const SECTION_META = {
   aff: { short: 'Aff', add: 'Add an aff argument', empty: 'No affirmative arguments yet.' },
   neg: { short: 'Neg', add: 'Add a neg argument', empty: 'No negative arguments yet.' },
@@ -302,9 +422,9 @@ function itemView(i, billId) {
   const flag = i.pending ? '<span class="pill warn">Waiting to send</span>' : i.conflict_of ? '<span class="pill failed" title="Saved while offline after a teammate changed the same entry. Keep one and delete the other.">Offline copy</span>' : '';
   const who = i.updated_by_name || i.created_by_name || '';
   const q = i.section === 'question';
-  return `<li class="ri ri-${i.section}${i.pending ? ' pending' : i.conflict_of ? ' conflict' : ''}">
+  return `<li class="ri ri-${i.section}${i.ai ? ' is-ai' : ''}${i.pending ? ' pending' : i.conflict_of ? ' conflict' : ''}">
     <div class="ri-view">
-      ${flag || (i.section === 'evidence' && i.side !== 'both') ? `<div class="ri-flags">${flag}${i.section === 'evidence' && i.side !== 'both' ? `<span class="pill ${i.side}">Supports ${i.side}</span>` : ''}</div>` : ''}
+      ${flag || i.ai || (i.section === 'evidence' && i.side !== 'both') ? `<div class="ri-flags">${i.ai ? aiBadge() : ''}${flag}${i.section === 'evidence' && i.side !== 'both' ? `<span class="pill ${i.side}">Supports ${i.side}</span>` : ''}</div>` : ''}
       <div class="ri-text">${q ? '<span class="ri-q">Q</span>' : ''}<strong>${esc(i.text)}</strong></div>
       ${i.detail ? `<div class="ri-detail${q ? ' ri-answer' : ''}">${q ? '<span class="ri-a">A</span>' : ''}<span>${esc(i.detail)}</span></div>` : ''}
       ${citation(i)}
@@ -315,6 +435,8 @@ function itemView(i, billId) {
 }
 async function viewBill(bid) {
   const { bill, items, my_plans, my_notes, links } = await api('GET', T(`/bills/${bid}`));
+  ui.billData = { bill, items };
+  if (aiPreview && aiPreview.bid !== bill.id) aiPreview = null;
   const evSide = ui.evSide || 'all';
   const m = billMeta(bill), res = bill.kind === 'resolution';
   const counts = Object.fromEntries(Object.keys(SECTION_META).map((k) => [k, items.filter((i) => i.section === k).length]));
@@ -353,6 +475,7 @@ async function viewBill(bid) {
       </div>
       <h1 class="bh-title">${esc(bill.title)}</h1>
       ${bill.preview ? `<p class="bc-preview bh-preview">${esc(bill.preview)}</p>` : ''}
+      ${bill.ai_summary ? `<div class="ai-summary">${aiBadge()}<p>${esc(bill.ai_summary)}</p><button class="icon-btn" data-tact="ai-sum-del" data-id="${bill.id}" title="Remove the AI summary" aria-label="Remove the AI summary">✕</button></div>` : ''}
       ${bill.body ? `<details class="bh-text"><summary class="btn sm ghost">${ICON.bill}<span class="when-closed">Read the full text</span><span class="when-open">Hide the full text</span></summary><pre class="legtext">${esc(bill.body)}</pre></details>` : ''}
       <form class="stack bh-edit" data-tform="edit-bill" data-id="${bill.id}" hidden>
         <div class="field"><label>Title</label><input name="title" value="${esc(bill.title)}"></div>
@@ -366,6 +489,7 @@ async function viewBill(bid) {
           ${my_notes.length ? my_notes.map((n) => `<a class="btn sm ghost" href="#/team/${teamCtx.id}/note/${n.id}">${ICON.note}${esc(n.title.replace(/^Notes: .*/, 'My notes'))}</a>`).join('') : `<button class="sm ghost" data-tact="note-from-bill" data-bill="${bill.id}" data-title="${esc(bill.title)}">${ICON.note}Private note</button>`}</div>
       </div>
     </header>
+    ${aiBand(bill)}
     <nav class="rs-jump" aria-label="Research sections">
       <span class="rd-badge rd-${st}" title="${sc} of 4 research areas started"><span class="pips">${Object.keys(SECTION_META).map((k) => `<i class="${counts[k] ? 'on' : ''}"></i>`).join('')}</span>${stl}</span>
       ${Object.entries(SECTION_META).map(([k, sm]) => `<a href="#sec-${k}" data-jump="sec-${k}" class="jump-${k}${counts[k] ? ' on' : ''}"><b>${counts[k]}</b> ${counts[k] === 1 && k === 'question' ? 'Question' : sm.short}</a>`).join('')}
@@ -435,7 +559,7 @@ async function viewPlan(pid) {
         ${runs.length ? runsLog(runs, plan.id, own, 3) : `<p class="small muted">Run it against a 3-minute timer, record yourself, and keep notes on what to fix.</p>`}</div>` : ''}
       <div class="card"><h2>Team research${plan.bill_title ? ` on this bill` : ''}</h2>
         ${!plan.bill_id ? '<p class="muted small">Pick a bill to see the team\'s arguments, evidence and likely questions here.</p>'
-          : relevant.length ? groups.map((g) => { const list = relevant.filter((i) => i.section === g); return list.length ? `<h3>${SECTION_LABEL[g]}</h3><ul class="list">${list.map((i) => `<li><div class="spread"><strong class="small">${esc(i.text)}</strong>${own ? `<button class="sm" data-tact="insert" data-text="${esc(i.text + (i.detail ? ` (${i.detail})` : '') + (citationText(i) ? ` [${citationText(i)}]` : ''))}">Insert</button>` : ''}</div>${citation(i)}</li>`).join('')}</ul>` : ''; }).join('')
+          : relevant.length ? groups.map((g) => { const list = relevant.filter((i) => i.section === g); return list.length ? `<h3>${SECTION_LABEL[g]}</h3><ul class="list">${list.map((i) => `<li><div class="spread"><strong class="small">${i.ai ? `${aiBadge()} ` : ''}${esc(i.text)}</strong>${own ? `<button class="sm" data-tact="insert" data-text="${esc(i.text + (i.detail ? ` (${i.detail})` : '') + (citationText(i) ? ` [${citationText(i)}]` : ''))}">Insert</button>` : ''}</div>${citation(i)}</li>`).join('')}</ul>` : ''; }).join('')
           : `<p class="muted small">No research yet. <a href="#/team/${teamCtx.id}/bill/${plan.bill_id}">Add some on the bill page</a>.</p>`}
       </div>
       </div>
@@ -625,7 +749,14 @@ document.addEventListener('keydown', (e) => {
   e.preventDefault();
   if (prac?.startedAt) pracPause(); else pracStart();
 });
-document.addEventListener('change', (e) => {
+document.addEventListener('change', async (e) => {
+  if (e.target.matches('[data-ai-show]')) { try { await api('PUT', '/api/me/ai', { hide: !e.target.checked }); reTeam(); } catch (err) { toast(err.message, true); } return; }
+  if (e.target.matches('[data-ai-file]')) {
+    const f = e.target.files[0]; if (!f) return;
+    if (f.size > 200000) { toast('That file is too big for a reply.', true); return; }
+    document.querySelector('[data-ai-text]').value = await f.text();
+    document.querySelector('[data-tact=ai-read]')?.click(); return;
+  }
   const opt = e.target.closest('[data-prac-opt]'); if (!opt) return;
   const o = pracOpts(); o[opt.dataset.pracOpt] = opt.checked; savePracOpts(o);
   if (opt.dataset.pracOpt === 'notes') document.querySelector('.practice')?.classList.toggle('with-notes', opt.checked);
@@ -704,6 +835,8 @@ async function viewMembers() {
         <div class="row"><button class="sm" data-tact="copy-link" data-link="${esc(link)}">Copy link</button><button class="sm" data-tact="new-code">Make a new code</button></div>
         <p class="small muted">New people create their own account with the code, then wait for a coach or captain to approve them. Making a new code stops the old one from working.</p></div>` : ''}
       ${m.isCoach ? `<form class="card stack" data-tform="team-settings"><h2>Team settings</h2><input name="name" value="${esc(team.name)}"><input name="school" value="${esc(team.school)}" placeholder="School">
+        <label class="switch-row"><input type="checkbox" name="ai_aids" ${team.ai_aids ? 'checked' : ''}> Allow AI Learning Aids</label>
+        <p class="small muted" style="margin:0">Members can download a prep kit for their own AI assistant and upload its reply, tagged as an AI Learning Aid. Turning this off hides those items and stops new uploads. Nothing is deleted.</p>
         <div class="row"><button class="sm primary">Save</button><button type="button" class="sm ghost" data-tact="delete-team">Delete team</button></div></form>` : ''}
       <div class="card"><button class="sm ghost" data-tact="leave">Leave this team</button></div>
     </div>
@@ -734,7 +867,7 @@ document.addEventListener('submit', async (e) => {
       case 'new-entry': await api('POST', T('/progress'), d); toast('Logged'); reTeam(); break;
       case 'new-goal': await api('POST', T('/goals'), { ...d, user_id: Number(f.dataset.user) }); toast('Goal added'); reTeam(); break;
       case 'new-link': await api('POST', T('/links'), { ...d, bill_id: f.dataset.bill ? Number(f.dataset.bill) : undefined, plan_id: f.dataset.plan ? Number(f.dataset.plan) : undefined }); toast('Link added'); reTeam(); break;
-      case 'team-settings': await api('PUT', T(''), d); toast('Saved'); reTeam(); break;
+      case 'team-settings': await api('PUT', T(''), { ...d, ai_aids: !!f.querySelector('[name=ai_aids]')?.checked }); toast('Saved'); reTeam(); break;
       case 'import': {
         const ids = [...f.querySelectorAll('input[name=leg]:checked')].map((x) => Number(x.value));
         if (!ids.length) return;
@@ -784,6 +917,29 @@ document.addEventListener('click', async (e) => {
           : '<p class="muted small">No docket items in chambers you belong to yet.</p>';
         break;
       }
+      case 'ai-kit-dl': case 'ai-kit-copy': {
+        const { bill, items } = ui.billData; const md = aiKit(bill, items);
+        if (d.tact === 'ai-kit-copy') { try { await navigator.clipboard.writeText(md); toast('Prep kit copied. Paste it into your AI assistant.'); } catch { toast('Could not copy. Use Download instead.', true); } break; }
+        const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
+        a.download = `${bill.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60)}-ai-kit.md`; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000); break;
+      }
+      case 'ai-upload': { const box = document.querySelector('.ai-upload'); box.hidden = !box.hidden; if (!box.hidden) box.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); break; }
+      case 'ai-cancel': aiPreview = null; reTeam(); break;
+      case 'ai-read': {
+        const text = document.querySelector('[data-ai-text]').value;
+        const data = await api('POST', T(`/bills/${d.id}/ai/read`), { text });
+        aiPreview = { bid: Number(d.id), data }; document.querySelector('.ai-upload').innerHTML = aiPreviewHtml(); break;
+      }
+      case 'ai-import': {
+        const p = aiPreview.data, box = document.querySelector('.ai-preview');
+        const picked = [...box.querySelectorAll('[data-aip]:checked')].map((x) => x.dataset.aip);
+        const items = picked.filter((k) => k !== 'summary').map((n) => { const { flags, ...it } = p.items[Number(n)]; return it; });
+        const r = await api('POST', T(`/bills/${aiPreview.bid}/ai/import`), { items, ...(picked.includes('summary') ? { summary: p.summary } : {}) });
+        aiPreview = null; toast(`Added ${r.added} AI Learning Aid${r.added === 1 ? '' : 's'}${picked.includes('summary') ? ' and the summary' : ''}`); reTeam(); break;
+      }
+      case 'ai-sum-del': if (confirm('Remove the AI summary from this bill?')) { await api('DELETE', T(`/bills/${d.id}/ai/summary`)); reTeam(); } break;
+      case 'ai-hide': await api('PUT', '/api/me/ai', { hide: d.hide === '1' }); toast(d.hide === '1' ? 'AI Learning Aids hidden. Turn them back on at the top of the team page.' : 'Showing AI Learning Aids'); reTeam(); break;
       case 'plan-practice': {
         const f = document.querySelector('[data-tform=save-plan]');
         if (f && !f.querySelector('[name=title]').disabled) { const fd = Object.fromEntries(new FormData(f)); await api('PUT', T(`/plans/${d.id}`), { ...fd, shared_with_leaders: !!f.querySelector('[name=shared_with_leaders]')?.checked }); }
