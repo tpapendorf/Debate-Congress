@@ -78,7 +78,7 @@ Everything added this way carries an **AI Learning Aid** badge, and keeps it eve
 
 ### Learning aids shipped with the app
 
-`server/seeds/<name>/*.md` holds replies in the kit format. When the server starts, `server/aiseed.js` loads each folder once onto every bill whose title matches, but only onto bills with no AI Learning Aids yet. It takes a backup first and records the run in `seed_runs`, so it never loads twice. If no bills match yet, it tries again on the next start. `ai-wsfa-fall-2026` covers the 17 WSFA Fall 2026 bills.
+`server/seeds/<name>/*.md` holds replies in the kit format. When the server starts, `server/aiseed.js` loads each folder once onto every bill whose title matches, but only onto bills with no AI Learning Aids yet. It takes a backup first and records the run in `seed_runs`, so it never loads twice. If no bills match yet, it tries again on the next start. A folder can include `seed.json` with `{ "replaces": "<older folder>" }`. The older set then never loads by itself. When the new set runs, it removes the older set's items that are still exactly as shipped and loads its own. A bill that holds any other AI items, such as a student's own upload or an edited shipped item, is left alone. `ai-wsfa-fall-2026-v2` covers the 17 WSFA Fall 2026 bills and replaces the first version, `ai-wsfa-fall-2026`.
 
 ## Citations and linked docs
 
