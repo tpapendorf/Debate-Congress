@@ -128,6 +128,7 @@ function schema(db) {
   if (!db.prepare('PRAGMA table_info(teams)').all().some((c) => c.name === 'ai_aids')) db.exec('ALTER TABLE teams ADD COLUMN ai_aids INTEGER NOT NULL DEFAULT 1');
   if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'hide_ai')) db.exec('ALTER TABLE users ADD COLUMN hide_ai INTEGER NOT NULL DEFAULT 0');
   if (!db.prepare('PRAGMA table_info(team_bills)').all().some((c) => c.name === 'status')) db.exec(`ALTER TABLE team_bills ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`);
+  require('./training').schema(db);
 }
 
 // What a link points at, from its address alone (we never need access to the Google file itself).
@@ -859,6 +860,8 @@ module.exports = function mountTeams(app, h) {
     q('DELETE FROM team_goals WHERE id = ? AND team_id = ?').run(Number(req.params.gid), team.id);
     return { ok: true };
   }));
+
+  require('./training').mountTraining(app, { q, tx, wrap, loadTeam, bad, forbidden, notFound, now, str });
 };
 
 module.exports.schema = schema;

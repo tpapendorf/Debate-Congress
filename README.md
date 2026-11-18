@@ -80,6 +80,17 @@ Everything added this way carries an **AI Learning Aid** badge, and keeps it eve
 
 `server/seeds/<name>/*.md` holds replies in the kit format. When the server starts, `server/aiseed.js` loads each folder once onto every bill whose title matches, but only onto bills with no AI Learning Aids yet. It takes a backup first and records the run in `seed_runs`, so it never loads twice. If no bills match yet, it tries again on the next start. A folder can include `seed.json` with `{ "replaces": "<older folder>" }`. The older set then never loads by itself. When the new set runs, it removes the older set's items that are still exactly as shipped and loads its own. A bill that holds any other AI items, such as a student's own upload or an edited shipped item, is left alone. `ai-wsfa-fall-2026-v2` covers the 17 WSFA Fall 2026 bills and replaces the first version, `ai-wsfa-fall-2026`.
 
+## Training
+
+Each team has a **Training** tab with short skill lessons in six tracks: Foundations, Arguments, Evidence, Questioning, Speech roles, and Delivery & presiding. A lesson has a short read, a strong example next to a weak one, and a **Try it** drill whose button opens a current bill, the practice timer or My prep. Everyone can mark a lesson done and sees their progress.
+
+- **Coaches and captains** add and edit lessons, and can pin one as **This week's focus**. They see how many teammates finished each lesson, and who.
+- **Coaches** can mark any lesson **Coach reviewed**.
+- **Practice this skill.** A lesson can be tied to a bill section (aff, neg, evidence or questions). Every bill page then links to it from that section.
+- **AI lessons.** *Add lessons with AI* gives a coach or captain a lesson kit for their own AI assistant, then reads the reply (`server/lessonkit.js`) and shows a preview before anything is added. These lessons carry the AI Learning Aid badge and follow the same switches as bill aids.
+
+The 12 starter lessons in `server/training/*.md` are in the same format. A team gets them the first time anyone opens Training. They're tagged as AI Learning Aids, since an AI assistant wrote them. Deleting one keeps it deleted. To ship more, add lessons and bump `STARTER_VERSION` in `server/training.js`; teams then get only the new titles.
+
 ## Citations and linked docs
 
 - **Fill in from link.** On any evidence card, paste the article link and press *Fill in from link*. The server reads the page's public details (author, title, publication, date) from the tags news sites and journals publish for this purpose. Check the result and fix anything it missed; some sites block lookups, and then you fill it in by hand.
