@@ -129,6 +129,7 @@ function schema(db) {
   if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'hide_ai')) db.exec('ALTER TABLE users ADD COLUMN hide_ai INTEGER NOT NULL DEFAULT 0');
   if (!db.prepare('PRAGMA table_info(team_bills)').all().some((c) => c.name === 'status')) db.exec(`ALTER TABLE team_bills ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`);
   require('./training').schema(db);
+  require('./drills').schema(db);
 }
 
 // What a link points at, from its address alone (we never need access to the Google file itself).
@@ -862,6 +863,7 @@ module.exports = function mountTeams(app, h) {
   }));
 
   require('./training').mountTraining(app, { q, tx, wrap, loadTeam, bad, forbidden, notFound, now, str });
+  require('./drills').mountDrills(app, { q, wrap, loadTeam, bad, notFound, now, billPreview });
 };
 
 module.exports.schema = schema;

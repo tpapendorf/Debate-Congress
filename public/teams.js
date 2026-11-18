@@ -105,11 +105,11 @@ async function renderTeam(id, tab = 'research', sub, sub2) {
     $view.innerHTML = `<div class="card"><p>${esc(e.message)}</p><a href="#/teams">← Teams</a></div>`; return;
   }
   const tabs = [['research', 'Research'], ['training', 'Training'], ['prep', 'My prep'], ['progress', 'Progress'], ['members', data.me.isLeader ? `Members${data.members.some((m) => m.status === 'pending') ? ' •' : ''}` : 'Members']];
-  const active = ['bill'].includes(tab) ? 'research' : tab === 'lesson' ? 'training' : (['plan', 'note', 'practice'].includes(tab) ? 'prep' : tab);
+  const active = ['bill'].includes(tab) ? 'research' : ['lesson', 'drill'].includes(tab) ? 'training' : (['plan', 'note', 'practice'].includes(tab) ? 'prep' : tab);
   let body;
   try {
     body = await ({
-      research: viewResearch, bill: () => viewBill(Number(sub)), training: viewTraining, lesson: () => viewLesson(Number(sub)), prep: viewPrep, plan: () => viewPlan(Number(sub)), practice: () => viewPractice(Number(sub)), note: () => viewNote(Number(sub)),
+      research: viewResearch, bill: () => viewBill(Number(sub)), training: viewTraining, lesson: () => viewLesson(Number(sub)), drill: () => viewDrill(Number(sub), sub2), prep: viewPrep, plan: () => viewPlan(Number(sub)), practice: () => viewPractice(Number(sub)), note: () => viewNote(Number(sub)),
       progress: () => viewProgress(sub ? Number(sub) : null), members: viewMembers,
     }[tab] || viewResearch)();
   } catch (e) { body = `<div class="card"><p>${esc(e.message)}</p></div>`; }
@@ -121,7 +121,6 @@ async function renderTeam(id, tab = 'research', sub, sub2) {
     ${data.team.ai_aids ? `<label class="switch-row small" title="Show research that teammates wrote with an AI assistant. Only changes what you see."><input type="checkbox" data-ai-show ${data.me.showAi ? 'checked' : ''}> Show AI Learning Aids</label>` : ''}
     <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/team/${id}/${k}" class="${k === active ? 'active' : ''}">${l}</a>`).join('')}</nav>
     ${body}`;
-  void sub2;
   if (keepOffline(id) && Offline.isOnline() && Date.now() - (keptAt(id) || 0) > 10 * 60 * 1000) saveTeamOffline(id);
 }
 // ---------- keep a team on this device ----------
@@ -135,7 +134,8 @@ async function saveTeamOffline(id) {
     const data = await api('GET', base);
     const { plans } = await api('GET', `${base}/prep`);
     const lessons = await api('GET', `${base}/lessons`).then((r) => r.lessons).catch(() => []);
-    const urls = [...data.bills.map((b) => `${base}/bills/${b.id}`), ...plans.map((p) => `${base}/plans/${p.id}`), `${base}/progress`, `${base}/lessons`, ...lessons.map((l) => `${base}/lessons/${l.id}`)];
+    const drillBills = await api('GET', `${base}/drills`).then((r) => r.bills).catch(() => []);
+    const urls = [...data.bills.map((b) => `${base}/bills/${b.id}`), ...plans.map((p) => `${base}/plans/${p.id}`), `${base}/progress`, `${base}/lessons`, ...lessons.map((l) => `${base}/lessons/${l.id}`), `${base}/drills`, ...drillBills.map((b) => `${base}/drills/${b.id}`)];
     await Offline.keep(urls);
     try { localStorage.setItem(keepKey(id), JSON.stringify({ at: Date.now() })); } catch { /* storage blocked */ }
     const el = document.querySelector('[data-keep-label]');

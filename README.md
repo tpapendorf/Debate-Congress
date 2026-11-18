@@ -91,6 +91,18 @@ Each team has a **Training** tab with short skill lessons in six tracks: Foundat
 
 The 12 starter lessons in `server/training/*.md` are in the same format. A team gets them the first time anyone opens Training. They're tagged as AI Learning Aids, since an AI assistant wrote them. Deleting one keeps it deleted. To ship more, add lessons and bump `STARTER_VERSION` in `server/training.js`; teams then get only the new titles.
 
+### Bill drills
+
+The top of the Training tab has **Bill drills**: quick spoken practice built from the team's research on the bills marked **Up next**. If no bill is marked, it uses the most recent bills that have research. Pick a bill, then a drill:
+
+- **Answer the question** (30 seconds): a likely question comes up, you answer it out loud, then see the prepared answer.
+- **Refute it** (30 seconds): an argument comes up, you answer it, then see the strongest attack on it and how the other side will defend it.
+- **Cite it** (15 seconds): a fact comes up, you say who, when and what, then see how to say it and the full citation.
+- **Speed round** (1 to 3 minutes): short flash cards. *By myself* counts toward readiness. *With a partner* shows the partner the question and the answer together, and saves nothing.
+- **Quick speech**: a random side and 2 minutes to outline from the team's research, then the practice timer opens with a speech plan already started.
+
+After each card you rate yourself Nailed it, Close or Need work, and "Need work" cards come first next time. Each bill shows a readiness checklist: read the summary, drill the questions, refute both sides, cite the evidence, and give one practice speech. Coaches and captains can pin a **This week's bill**, and they see each teammate's readiness on each bill and the drill type they find hardest.
+
 ## Citations and linked docs
 
 - **Fill in from link.** On any evidence card, paste the article link and press *Fill in from link*. The server reads the page's public details (author, title, publication, date) from the tags news sites and journals publish for this purpose. Check the result and fix anything it missed; some sites block lookups, and then you fill it in by hand.
