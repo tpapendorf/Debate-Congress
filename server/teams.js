@@ -1,4 +1,5 @@
 'use strict';
+const { parseAiReply } = require('./aikit');
 // Teams: join codes with leader approval, shared bill research, private speech plans and notes, progress.
 const crypto = require('node:crypto');
 
@@ -121,6 +122,11 @@ function schema(db) {
   // An offline edit that crossed someone else's newer edit is saved as a separate copy pointing at the original.
   if (!cols.includes('conflict_of')) db.exec('ALTER TABLE bill_items ADD COLUMN conflict_of INTEGER');
   // Bills can be flagged as current (on an upcoming docket) or archived (old, hidden from the main list).
+  // AI Learning Aids: research a student's own AI assistant wrote, tagged so anyone can hide it.
+  if (!cols.includes('ai')) db.exec('ALTER TABLE bill_items ADD COLUMN ai INTEGER NOT NULL DEFAULT 0');
+  if (!db.prepare('PRAGMA table_info(team_bills)').all().some((c) => c.name === 'ai_summary')) db.exec(`ALTER TABLE team_bills ADD COLUMN ai_summary TEXT NOT NULL DEFAULT ''`);
+  if (!db.prepare('PRAGMA table_info(teams)').all().some((c) => c.name === 'ai_aids')) db.exec('ALTER TABLE teams ADD COLUMN ai_aids INTEGER NOT NULL DEFAULT 1');
+  if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'hide_ai')) db.exec('ALTER TABLE users ADD COLUMN hide_ai INTEGER NOT NULL DEFAULT 0');
   if (!db.prepare('PRAGMA table_info(team_bills)').all().some((c) => c.name === 'status')) db.exec(`ALTER TABLE team_bills ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`);
 }
 
@@ -267,7 +273,8 @@ module.exports = function mountTeams(app, h) {
     if (!role) throw forbidden(mem ? 'A coach or captain still needs to approve you.' : 'You are not on this team.');
     if (need === 'leader' && !isLeader) throw forbidden('Only coaches and captains can do that.');
     if (need === 'coach' && role !== 'coach') throw forbidden('Only coaches can do that.');
-    return { user, team, role, isLeader };
+    const hideAi = !!q('SELECT hide_ai FROM users WHERE id = ?').get(user.id)?.hide_ai;
+    return { user, team, role, isLeader, hideAi, showAi: !!team.ai_aids && !hideAi };
   }
   function getBill(team, bid) {
     const b = q('SELECT * FROM team_bills WHERE id = ? AND team_id = ?').get(Number(bid), team.id);
@@ -334,16 +341,16 @@ module.exports = function mountTeams(app, h) {
   }));
 
   app.get('/api/teams/:tid', wrap((req) => {
-    const { user, team, role, isLeader } = loadTeam(req);
+    const { user, team, role, isLeader, hideAi, showAi } = loadTeam(req);
     const members = q(`SELECT tm.user_id id, tm.role, tm.status, tm.joined_at, u.display_name name, u.school FROM team_members tm
                        JOIN users u ON u.id = tm.user_id WHERE tm.team_id = ? ORDER BY tm.status DESC, tm.role, u.display_name`).all(team.id)
       .filter((m) => isLeader || m.status === 'active');
     const bills = q(`SELECT b.id, b.title, b.kind, b.source, b.status, b.created_by, b.updated_at, b.summary, substr(b.body, 1, 1500) body_start,
-                       (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'aff') aff,
-                       (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'neg') neg,
-                       (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'evidence') evidence,
-                       (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'question') questions
-                     FROM team_bills b WHERE b.team_id = ? ORDER BY b.updated_at DESC`).all(team.id);
+                       (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'aff' AND (i.ai = 0 OR ?1)) aff,
+                       (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'neg' AND (i.ai = 0 OR ?1)) neg,
+                       (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'evidence' AND (i.ai = 0 OR ?1)) evidence,
+                       (SELECT COUNT(*) FROM bill_items i WHERE i.bill_id = b.id AND i.section = 'question' AND (i.ai = 0 OR ?1)) questions
+                     FROM team_bills b WHERE b.team_id = ?2 ORDER BY b.updated_at DESC`).all(showAi ? 1 : 0, team.id);
     // Each bill card shows a short preview and the viewer's own speech plans on it.
     const myPlans = q('SELECT id, bill_id, side, status FROM speech_plans WHERE team_id = ? AND user_id = ? AND bill_id IS NOT NULL ORDER BY updated_at DESC').all(team.id, user.id);
     for (const b of bills) {
@@ -355,15 +362,15 @@ module.exports = function mountTeams(app, h) {
                      WHERE l.team_id = ? AND l.bill_id IS NULL AND l.plan_id IS NULL ORDER BY l.created_at DESC`).all(team.id);
     return {
       links,
-      team: { id: team.id, name: team.name, school: team.school, join_code: isLeader ? team.join_code : null },
-      me: { id: user.id, role, isLeader, isCoach: role === 'coach' },
+      team: { id: team.id, name: team.name, school: team.school, join_code: isLeader ? team.join_code : null, ai_aids: !!team.ai_aids },
+      me: { id: user.id, role, isLeader, isCoach: role === 'coach', hideAi, showAi },
       members, bills,
     };
   }));
   app.put('/api/teams/:tid', wrap((req) => {
     const { team } = loadTeam(req, 'coach');
     const b = req.body || {};
-    q('UPDATE teams SET name = ?, school = ? WHERE id = ?').run(str(b.name ?? team.name, 100) || team.name, str(b.school ?? team.school, 100), team.id);
+    q('UPDATE teams SET name = ?, school = ?, ai_aids = ? WHERE id = ?').run(str(b.name ?? team.name, 100) || team.name, str(b.school ?? team.school, 100), b.ai_aids === undefined ? team.ai_aids : (b.ai_aids ? 1 : 0), team.id);
     return { ok: true };
   }));
   app.post('/api/teams/:tid/code', wrap((req) => {
@@ -472,11 +479,12 @@ module.exports = function mountTeams(app, h) {
     return { added };
   }));
   app.get('/api/teams/:tid/bills/:bid', wrap((req) => {
-    const { team, user } = loadTeam(req);
+    const { team, user, showAi } = loadTeam(req);
     const bill = getBill(team, req.params.bid);
+    if (!showAi) bill.ai_summary = '';
     const items = q(`SELECT i.*, cu.display_name created_by_name, uu.display_name updated_by_name FROM bill_items i
                      LEFT JOIN users cu ON cu.id = i.created_by LEFT JOIN users uu ON uu.id = i.updated_by
-                     WHERE i.bill_id = ? ORDER BY i.section, i.id`).all(bill.id);
+                     WHERE i.bill_id = ? AND (i.ai = 0 OR ?) ORDER BY i.section, i.id`).all(bill.id, showAi ? 1 : 0);
     const my_plans = q('SELECT id, title, side, status FROM speech_plans WHERE bill_id = ? AND user_id = ? ORDER BY updated_at DESC').all(bill.id, user.id);
     const my_notes = q('SELECT id, title FROM team_notes WHERE bill_id = ? AND user_id = ? ORDER BY updated_at DESC').all(bill.id, user.id);
     const links = q(`SELECT l.*, u.display_name added_by FROM team_links l LEFT JOIN users u ON u.id = l.created_by
@@ -529,6 +537,60 @@ module.exports = function mountTeams(app, h) {
     return { section, side, text, detail: str(b.detail ?? existing.detail), cite_title: str(b.cite_title ?? existing.cite_title, 300), cite_source: str(b.cite_source ?? existing.cite_source, 300),
       cite_author: str(b.cite_author ?? existing.cite_author, 200), cite_date: str(b.cite_date ?? existing.cite_date, 50), cite_url: url };
   }
+  // ---------- AI Learning Aids ----------
+  // Students run the prep kit through their own AI assistant and upload its reply. Nothing here calls an AI.
+  function aiTeam(req) {
+    const ctx = loadTeam(req);
+    if (!ctx.team.ai_aids) throw forbidden('Your coach has turned off AI Learning Aids for this team.');
+    return ctx;
+  }
+  app.post('/api/teams/:tid/bills/:bid/ai/read', wrap((req) => {
+    const { team } = aiTeam(req);
+    const bill = getBill(team, req.params.bid);
+    const text = String((req.body || {}).text || '');
+    if (!text.trim()) throw bad('Upload or paste the reply from your AI assistant.');
+    if (text.length > 200000) throw bad('That reply is too long.');
+    const out = parseAiReply(text);
+    const have = new Set(q('SELECT section, text FROM bill_items WHERE bill_id = ?').all(bill.id).map((i) => `${i.section}|${i.text.toLowerCase().trim()}`));
+    for (const i of out.items) if (have.has(`${i.section}|${i.text.toLowerCase()}`)) i.flags.push('duplicate');
+    const norm = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (out.title && norm(out.title) !== norm(bill.title) && !norm(bill.title).includes(norm(out.title)) && !norm(out.title).includes(norm(bill.title))) {
+      out.warnings.push(`This reply is titled "${out.title}", which doesn't match this bill. Make sure you uploaded the right file.`);
+    }
+    return out;
+  }));
+  app.post('/api/teams/:tid/bills/:bid/ai/import', wrap((req) => {
+    const { team, user } = aiTeam(req);
+    const bill = getBill(team, req.params.bid);
+    const b = req.body || {};
+    const items = (Array.isArray(b.items) ? b.items : []).slice(0, 80);
+    let added = 0;
+    tx(() => {
+      for (const raw of items) {
+        let f;
+        try { f = itemFields(raw); } catch { continue; }
+        if (f.section === 'evidence' && !/^https?:\/\//i.test(f.cite_url)) continue;
+        q(`INSERT INTO bill_items (bill_id, section, side, text, detail, cite_title, cite_source, cite_author, cite_date, cite_url, created_by, updated_by, updated_at, ai)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`)
+          .run(bill.id, f.section, f.side, f.text, f.detail, f.cite_title, f.cite_source, f.cite_author, f.cite_date, f.cite_url, user.id, user.id, now());
+        added++;
+      }
+      if (b.summary !== undefined) q('UPDATE team_bills SET ai_summary = ? WHERE id = ?').run(str(b.summary, 2000), bill.id);
+      q('UPDATE team_bills SET updated_at = ? WHERE id = ?').run(now(), bill.id);
+    });
+    return { added };
+  }));
+  app.delete('/api/teams/:tid/bills/:bid/ai/summary', wrap((req) => {
+    const { team } = loadTeam(req);
+    q(`UPDATE team_bills SET ai_summary = '' WHERE id = ?`).run(getBill(team, req.params.bid).id);
+    return { ok: true };
+  }));
+  // Each person's own switch, on every team they belong to.
+  app.put('/api/me/ai', wrap((req) => {
+    const user = requireUser(req);
+    q('UPDATE users SET hide_ai = ? WHERE id = ?').run((req.body || {}).hide ? 1 : 0, user.id);
+    return { ok: true };
+  }));
   app.post('/api/teams/:tid/bills/:bid/items', wrap((req) => {
     const { team, user } = loadTeam(req);
     const bill = getBill(team, req.params.bid);
@@ -547,9 +609,9 @@ module.exports = function mountTeams(app, h) {
     const f = itemFields(req.body || {}, it);
     const base = Number((req.body || {}).base_updated_at);
     if (base && it.updated_at > base && it.updated_by !== user.id) {
-      const r = q(`INSERT INTO bill_items (bill_id, section, side, text, detail, cite_title, cite_source, cite_author, cite_date, cite_url, created_by, updated_by, updated_at, conflict_of)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(bill.id, f.section, f.side, f.text, f.detail, f.cite_title, f.cite_source, f.cite_author, f.cite_date, f.cite_url, user.id, user.id, now(), it.id);
+      const r = q(`INSERT INTO bill_items (bill_id, section, side, text, detail, cite_title, cite_source, cite_author, cite_date, cite_url, created_by, updated_by, updated_at, conflict_of, ai)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(bill.id, f.section, f.side, f.text, f.detail, f.cite_title, f.cite_source, f.cite_author, f.cite_date, f.cite_url, user.id, user.id, now(), it.id, it.ai);
       return { ok: true, conflict: true, id: Number(r.lastInsertRowid) };
     }
     q(`UPDATE bill_items SET section = ?, side = ?, text = ?, detail = ?, cite_title = ?, cite_source = ?, cite_author = ?, cite_date = ?, cite_url = ?, updated_by = ?, updated_at = ? WHERE id = ?`)
@@ -600,9 +662,9 @@ module.exports = function mountTeams(app, h) {
     return { p, own };
   }
   app.get('/api/teams/:tid/plans/:pid', wrap((req) => {
-    const { team, user, isLeader } = loadTeam(req);
+    const { team, user, isLeader, showAi } = loadTeam(req);
     const { p, own } = getPlan(req, team, user, isLeader);
-    const evidence = p.bill_id ? q(`SELECT * FROM bill_items WHERE bill_id = ? ORDER BY section, id`).all(p.bill_id) : [];
+    const evidence = p.bill_id ? q(`SELECT * FROM bill_items WHERE bill_id = ? AND (ai = 0 OR ?) ORDER BY section, id`).all(p.bill_id, showAi ? 1 : 0) : [];
     const author = q('SELECT display_name FROM users WHERE id = ?').get(p.user_id)?.display_name;
     const links = q('SELECT * FROM team_links WHERE plan_id = ? ORDER BY created_at DESC').all(p.id);
     const runs = q('SELECT id, seconds, target, rating, notes, created_at FROM practice_runs WHERE plan_id = ? ORDER BY created_at DESC, id DESC').all(p.id);

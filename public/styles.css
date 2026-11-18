@@ -603,3 +603,49 @@ button.danger-ghost { color: var(--neg); border-color: color-mix(in srgb, var(--
 .rate button.on { outline: 0; }
 @media (hover: none) { .kbd-only { display: none; } }
 .practice-go.primary { background: var(--gold); border-color: var(--gold); color: var(--gold-ink); }
+/* AI Learning Aids */
+:root { --ai: #0e8f8f; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ai: #3cc9c4; } }
+.ai-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 800; letter-spacing: .4px; text-transform: uppercase; padding: 2px 8px 2px 6px; border-radius: 99px; color: var(--ai); background: color-mix(in srgb, var(--ai) 12%, var(--card)); border: 1px solid color-mix(in srgb, var(--ai) 35%, transparent); white-space: nowrap; vertical-align: 1px; }
+.ai-badge .ic { width: 11px; height: 11px; }
+.ri.is-ai { border-style: dashed; border-left-style: solid; background: linear-gradient(90deg, color-mix(in srgb, var(--ai) 5%, var(--card)), var(--card) 70%); }
+.ai-summary { position: relative; margin: 0 0 12px; padding: 10px 40px 10px 12px; border-radius: 10px; border: 1px dashed color-mix(in srgb, var(--ai) 45%, var(--line)); background: color-mix(in srgb, var(--ai) 6%, var(--card)); }
+.ai-summary p { margin: 6px 0 0; font-size: 14.5px; }
+.ai-summary .icon-btn { position: absolute; top: 6px; right: 6px; }
+.ai-band { margin: 0 0 12px; padding: 14px 18px; border-radius: var(--radius); background: var(--card); border: 1px solid color-mix(in srgb, var(--ai) 40%, var(--line)); border-left: 5px solid var(--ai); box-shadow: var(--shadow); }
+.ai-band-head { display: flex; gap: 12px; align-items: flex-start; }
+.ai-band-head h2 { margin: 0; font-size: 17px; }
+.ai-band-head p { margin: 2px 0 0; color: var(--muted); }
+.ai-mark { flex: none; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: var(--ai); color: #fff; }
+.ai-mark .ic { width: 20px; height: 20px; }
+.ai-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.ai-step { display: flex; gap: 10px; padding: 10px 12px; border-radius: 10px; background: var(--soft); border: 1px solid var(--line); }
+.ai-step b { display: block; margin-bottom: 4px; }
+.ai-step .row { gap: 6px; }
+.ai-num { flex: none; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--ai) 15%, var(--card)); color: var(--ai); font-weight: 800; font-size: 13px; }
+.ai-step .primary { background: var(--ai); border-color: var(--ai); }
+.ai-upload { margin-top: 12px; padding: 12px; border-radius: 10px; border: 1px dashed color-mix(in srgb, var(--ai) 50%, var(--line)); }
+.ai-upload[hidden] { display: none; }
+.ai-file { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+.ai-file input { width: auto; min-height: 0; }
+.ai-band-foot { margin-top: 8px; text-align: right; }
+.ai-band-foot .linkish { color: var(--muted); }
+.ai-hidden { margin: 0 0 12px; display: flex; align-items: center; gap: 6px; }
+.ai-hidden .ic { color: var(--ai); }
+.ai-preview h4 { margin: 12px 0 4px; font-size: 13px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.aip-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 6px; border-top: 1px solid var(--line); color: var(--ink); cursor: pointer; }
+.aip-row input { width: auto; min-height: 0; margin-top: 3px; }
+.aip-row > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.aip-row b { font-weight: 700; }
+.aip-detail { font-size: 13.5px; color: var(--muted); white-space: pre-line; }
+.aip-flag { font-size: 12.5px; font-weight: 700; color: var(--warn); }
+.aip-row.blocked { opacity: .7; cursor: default; }
+.aip-actions { margin-top: 12px; }
+.aip-actions .primary { background: var(--ai); border-color: var(--ai); gap: 6px; }
+@media (max-width: 720px) {
+  .ai-steps { grid-template-columns: 1fr; }
+  .ai-band { padding: 12px 14px; }
+}
+.aip-row .pill { align-self: flex-start; }
+.ri-detail { white-space: pre-line; }
+@media (prefers-color-scheme: dark) { .ai-step .primary, .aip-actions .primary, .ai-mark { color: #062b2b; } }
