@@ -76,6 +76,8 @@ const EXPORT = [
   ['team_links', 'SELECT * FROM team_links WHERE plan_id IS NULL ORDER BY team_id, id'],
   ['team_progress', 'SELECT * FROM progress_entries ORDER BY team_id, user_id'],
   ['team_goals', 'SELECT * FROM team_goals ORDER BY team_id, user_id'],
+  ['training_lessons', 'SELECT * FROM lessons ORDER BY team_id, track, sort, id'],
+  ['training_done', 'SELECT * FROM lesson_done ORDER BY lesson_id, user_id'],
 ];
 const csvCell = (v) => {
   if (v == null) return '';

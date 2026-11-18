@@ -104,12 +104,12 @@ async function renderTeam(id, tab = 'research', sub, sub2) {
   try { data = await loadTeamData(id); } catch (e) {
     $view.innerHTML = `<div class="card"><p>${esc(e.message)}</p><a href="#/teams">← Teams</a></div>`; return;
   }
-  const tabs = [['research', 'Research'], ['prep', 'My prep'], ['progress', 'Progress'], ['members', data.me.isLeader ? `Members${data.members.some((m) => m.status === 'pending') ? ' •' : ''}` : 'Members']];
-  const active = ['bill'].includes(tab) ? 'research' : (['plan', 'note', 'practice'].includes(tab) ? 'prep' : tab);
+  const tabs = [['research', 'Research'], ['training', 'Training'], ['prep', 'My prep'], ['progress', 'Progress'], ['members', data.me.isLeader ? `Members${data.members.some((m) => m.status === 'pending') ? ' •' : ''}` : 'Members']];
+  const active = ['bill'].includes(tab) ? 'research' : tab === 'lesson' ? 'training' : (['plan', 'note', 'practice'].includes(tab) ? 'prep' : tab);
   let body;
   try {
     body = await ({
-      research: viewResearch, bill: () => viewBill(Number(sub)), prep: viewPrep, plan: () => viewPlan(Number(sub)), practice: () => viewPractice(Number(sub)), note: () => viewNote(Number(sub)),
+      research: viewResearch, bill: () => viewBill(Number(sub)), training: viewTraining, lesson: () => viewLesson(Number(sub)), prep: viewPrep, plan: () => viewPlan(Number(sub)), practice: () => viewPractice(Number(sub)), note: () => viewNote(Number(sub)),
       progress: () => viewProgress(sub ? Number(sub) : null), members: viewMembers,
     }[tab] || viewResearch)();
   } catch (e) { body = `<div class="card"><p>${esc(e.message)}</p></div>`; }
@@ -134,7 +134,8 @@ async function saveTeamOffline(id) {
   try {
     const data = await api('GET', base);
     const { plans } = await api('GET', `${base}/prep`);
-    const urls = [...data.bills.map((b) => `${base}/bills/${b.id}`), ...plans.map((p) => `${base}/plans/${p.id}`), `${base}/progress`];
+    const lessons = await api('GET', `${base}/lessons`).then((r) => r.lessons).catch(() => []);
+    const urls = [...data.bills.map((b) => `${base}/bills/${b.id}`), ...plans.map((p) => `${base}/plans/${p.id}`), `${base}/progress`, `${base}/lessons`, ...lessons.map((l) => `${base}/lessons/${l.id}`)];
     await Offline.keep(urls);
     try { localStorage.setItem(keepKey(id), JSON.stringify({ at: Date.now() })); } catch { /* storage blocked */ }
     const el = document.querySelector('[data-keep-label]');
@@ -434,7 +435,7 @@ function itemView(i, billId) {
     <div class="ri-edit">${itemForm(i.section, i, billId)}</div></li>`;
 }
 async function viewBill(bid) {
-  const { bill, items, my_plans, my_notes, links } = await api('GET', T(`/bills/${bid}`));
+  const [{ bill, items, my_plans, my_notes, links }] = await Promise.all([api('GET', T(`/bills/${bid}`)), loadLessons().catch(() => null)]);
   ui.billData = { bill, items };
   if (aiPreview && aiPreview.bid !== bill.id) aiPreview = null;
   const evSide = ui.evSide || 'all';
@@ -450,6 +451,7 @@ async function viewBill(bid) {
       <header class="rs-head"><span class="rs-icon">${ICON['sec_' + k]}</span><h2>${SECTION_LABEL[k]}</h2><span class="rs-count">${counts[k]}</span>
         ${k === 'evidence' && counts.evidence ? `<div class="seg rs-filter">${['all', 'aff', 'neg'].map((s) => `<button class="${evSide === s ? 'on' : ''}" data-tact="ev-side" data-side="${s}">${s === 'all' ? 'All' : s === 'aff' ? 'Aff' : 'Neg'}</button>`).join('')}</div>` : ''}
         <button class="sm rs-addbtn" data-tact="sec-add" aria-label="${sm.add}">+ Add</button></header>
+      ${skillLink(k)}
       <div class="rs-add" hidden><h3>${sm.add}</h3>${itemForm(k, {}, bid)}</div>
       ${list.length ? `<ul class="rs-items">${list.map((i) => itemView(i, bid)).join('')}</ul>`
         : `<div class="rs-empty"><p>${counts[k] ? 'Nothing for this side yet.' : sm.empty}</p><button class="sm" data-tact="sec-add">+ ${sm.add}</button></div>`}

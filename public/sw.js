@@ -2,7 +2,7 @@
 /* Keeps the app's own files on this device so it opens without a connection.
    Always asks the server first, so a new version is picked up whenever online. */
 const SHELL = 'congress-shell-v1', FONTS = 'congress-fonts-v1';
-const FILES = ['/', '/styles.css', '/offline.js', '/app.js', '/teams.js'];
+const FILES = ['/', '/styles.css', '/offline.js', '/app.js', '/teams.js', '/training.js'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
