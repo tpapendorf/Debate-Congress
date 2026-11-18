@@ -76,6 +76,10 @@ The app never talks to an AI itself. Instead, each bill page has an **AI Learnin
 
 Everything added this way carries an **AI Learning Aid** badge, and keeps it even after a teammate edits it. Anyone can untick **Show AI Learning Aids** at the top of the team page to hide them for themselves; research counts then leave them out too. A coach can turn **Allow AI Learning Aids** off in Team settings. That hides them for the whole team and stops new uploads, but nothing is deleted.
 
+### Learning aids shipped with the app
+
+`server/seeds/<name>/*.md` holds replies in the kit format. When the server starts, `server/aiseed.js` loads each folder once onto every bill whose title matches, but only onto bills with no AI Learning Aids yet. It takes a backup first and records the run in `seed_runs`, so it never loads twice. If no bills match yet, it tries again on the next start. `ai-wsfa-fall-2026` covers the 17 WSFA Fall 2026 bills.
+
 ## Citations and linked docs
 
 - **Fill in from link.** On any evidence card, paste the article link and press *Fill in from link*. The server reads the page's public details (author, title, publication, date) from the tags news sites and journals publish for this purpose. Check the result and fix anything it missed; some sites block lookups, and then you fill it in by hand.

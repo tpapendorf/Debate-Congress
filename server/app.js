@@ -1299,6 +1299,10 @@ function createApp(db0, { publicDir = path.join(__dirname, '..', 'public'), dbFi
     require('./teams').schema(db);
   }
   const backups = require('./backup')(app, { getDb: () => db, q, wrap, requireAdmin, bad, notFound, dbFile, backupDir, reopen });
+  // Learning aids shipped with the app, loaded once into the real database (never into test databases).
+  if (dbFile && dbFile !== ':memory:') {
+    try { require('./aiseed').runAiSeeds(db, { backup: () => backups.create('manual') }); } catch (e) { console.error('AI seed failed:', e.message); }
+  }
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
   app.use(express.static(publicDir));
