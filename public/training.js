@@ -75,7 +75,7 @@ function lessonRow(l, members) {
 }
 
 async function viewTraining() {
-  const data = await loadLessons(true);
+  const [data, drills] = await Promise.all([loadLessons(true), drillsSection()]);
   const { lessons, members, hidden_ai } = data;
   const me2 = teamCtx.data.me, team = teamCtx.data.team, leader = me2.isLeader;
   const pinned = lessons.find((l) => l.pinned);
@@ -87,7 +87,7 @@ async function viewTraining() {
       ? `<p class="ai-hidden small muted">${AI_ICON} ${hidden_ai} lesson${hidden_ai === 1 ? ' was' : 's were'} written with an AI assistant and ${hidden_ai === 1 ? 'is' : 'are'} hidden for you. <button class="linkish" data-tact="ai-hide" data-hide="0">Show them</button></p>`
       : `<p class="ai-hidden small muted">${AI_ICON} ${hidden_ai} lesson${hidden_ai === 1 ? '' : 's'} written with an AI assistant ${hidden_ai === 1 ? 'is' : 'are'} hidden because AI Learning Aids are off for this team.${me2.isCoach ? ' Turn them on under Members → Team settings.' : ''}</p>`)
     : '';
-  return `
+  return `${drills}
     <section class="tr-head">
       <div class="tr-intro"><h2>Training</h2>
         <p class="small muted">Short lessons on the skills judges reward. Each one has a strong example next to a weak one and a drill to try in the app.</p></div>
